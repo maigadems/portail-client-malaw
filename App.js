@@ -28,9 +28,12 @@ import {
 import AppNavigator from './src/navigation/AppNavigator';
 import SessionExpiredModal from './src/components/SessionExpiredModal';
 import AppAlertHost from './src/components/AppAlert';
+import ErrorBoundary from './src/components/ErrorBoundary';
+import OfflineBanner from './src/components/OfflineBanner';
 import { ThemeProvider, useTheme } from './src/context/ThemeContext';
 import { LanguageProvider } from './src/context/LanguageContext';
 import { CartProvider } from './src/context/CartContext';
+import { OrderProvider } from './src/context/OrderContext';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -44,6 +47,8 @@ function Root() {
       {/* Hôte des boîtes de dialogue : monté après le navigateur pour
           s'afficher au-dessus de n'importe quel écran. */}
       <AppAlertHost />
+      {/* Bandeau hors-ligne : en dernier pour couvrir tout écran. */}
+      <OfflineBanner />
     </>
   );
 }
@@ -81,9 +86,19 @@ export default function App() {
       <LanguageProvider>
         <ThemeProvider>
           <CartProvider>
-            <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
-              <Root />
-            </View>
+            {/* Le suivi de commande enveloppe la navigation : il doit
+                survivre aux changements d'écran et être rétabli au
+                démarrage, même si l'app a été fermée pendant la livraison. */}
+            <OrderProvider>
+              <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
+                {/* Rattrape les exceptions de rendu : sans lui, une erreur
+                    dans n'importe quel écran fait tomber toute l'app sur un
+                    écran blanc, sans explication ni moyen de repartir. */}
+                <ErrorBoundary>
+                  <Root />
+                </ErrorBoundary>
+              </View>
+            </OrderProvider>
           </CartProvider>
         </ThemeProvider>
       </LanguageProvider>

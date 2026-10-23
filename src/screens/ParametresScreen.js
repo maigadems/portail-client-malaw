@@ -1,5 +1,18 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Linking } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Switch,
+  Linking,
+  Modal,
+  TextInput,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getColors, Fonts } from '../constants/theme';
@@ -7,7 +20,10 @@ import { useTheme } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import MalawLogo from '../components/MalawLogo';
 import { useUser, formatPhone } from '../hooks/useUser';
-import { logout } from '../api/auth';
+import { logout, deleteAccount, PIN_LENGTH } from '../api/auth';
+import { clearSession } from '../api/client';
+import { getSettings, updateSettings } from '../api/settings';
+import { registerPushDevice, unregisterPushDevice } from '../api/notifications';
 import { Alert } from '../components/AppAlert';
 
 const LANGUAGES = [
@@ -82,14 +98,107 @@ export default function ParametresScreen({ navigation }) {
   const s = t.settings;
   const { user } = useUser();
 
+  // Préférences du compte, telles que le serveur les connaît. `null` tant
+  // qu'elles ne sont pas chargées : afficher un interrupteur avant d'en
+  // connaître la valeur afficherait un réglage faux.
+  const [settings, setSettings] = useState(null);
+  const [loadingSettings, setLoadingSettings] = useState(true);
+  const [savingKey, setSavingKey] = useState(null);
+
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePin, setDeletePin] = useState('');
+  const [deleteReason, setDeleteReason] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    getSettings()
+      .then((data) => { if (active) setSettings(data); })
+      .catch((e) => { if (active) Alert.alert(s.preferences, e.message); })
+      .finally(() => { if (active) setLoadingSettings(false); });
+    return () => { active = false; };
+  }, []);
+
+  /**
+   * Bascule une préférence. L'interrupteur bouge tout de suite (sinon il
+   * paraît insensible le temps de l'aller-retour) mais revient à son état
+   * précédent si le serveur refuse : ce qui est affiché doit toujours être
+   * ce qui est enregistré.
+   */
+  const toggleSetting = async (key, value) => {
+    if (savingKey || !settings) return;
+    const previous = settings[key];
+    setSettings({ ...settings, [key]: value });
+    setSavingKey(key);
+    try {
+      const saved = await updateSettings({ [key]: value });
+      setSettings(saved);
+      // Le serveur ne pousse qu'aux appareils enregistrés : réactiver le push
+      // sans réinscrire l'appareil ne changerait rien.
+      if (key === 'pushEnabled' && value) await registerPushDevice();
+      if (key === 'pushEnabled' && !value) await unregisterPushDevice();
+    } catch (e) {
+      setSettings((cur) => ({ ...cur, [key]: previous }));
+      Alert.alert(s.preferences, e.message);
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  /**
+   * La langue est aussi une préférence du compte : sans cette synchro, le
+   * serveur continuerait d'écrire ses notifications en français à un client
+   * passé en anglais.
+   */
+  const handleLang = (id) => {
+    setLang(id);
+    if (settings?.preferredLanguage === id) return;
+    updateSettings({ preferredLanguage: id })
+      .then((saved) => setSettings(saved))
+      .catch((e) => Alert.alert(s.preferences, e.message));
+  };
+
   const handleLogout = async () => {
+    // Retrait de l'appareil d'abord : après `logout()` il n'y a plus de jeton
+    // pour autoriser l'appel, et le serveur pousserait encore les commandes
+    // du compte précédent sur ce téléphone.
+    await unregisterPushDevice();
     await logout();
     navigation.replace('Connexion');
   };
 
-  const [notifOrders, setNotifOrders] = useState(true);
-  const [notifPromos, setNotifPromos] = useState(true);
-  const [notifSMS, setNotifSMS] = useState(true);
+  const closeDelete = () => {
+    if (deleting) return;
+    setDeleteOpen(false);
+    setDeletePin('');
+    setDeleteReason('');
+    setDeleteError('');
+  };
+
+  const confirmDelete = async () => {
+    if (deleting) return;
+    if (!new RegExp(`^\\d{${PIN_LENGTH}}$`).test(deletePin)) {
+      setDeleteError(s.deletePinInvalid.replace('{n}', PIN_LENGTH));
+      return;
+    }
+    setDeleteError('');
+    setDeleting(true);
+    try {
+      await deleteAccount({ pin: deletePin, reason: deleteReason.trim() || undefined });
+      // Le compte n'existe plus : la session locale n'a plus aucun sens et
+      // l'historique de navigation ne doit pas permettre d'y revenir.
+      await clearSession();
+      setDeleteOpen(false);
+      navigation.reset({ index: 0, routes: [{ name: 'Connexion' }] });
+    } catch (e) {
+      // Message serveur tel quel : c'est lui qui explique le refus (commande
+      // en cours, PIN erroné…).
+      setDeleteError(e.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <View style={[styles(Colors).container, { paddingTop: insets.top }]}>
@@ -119,7 +228,7 @@ export default function ParametresScreen({ navigation }) {
               <TouchableOpacity
                 key={l.id}
                 style={[styles(Colors).langChip, lang === l.id && styles(Colors).langChipActive]}
-                onPress={() => setLang(l.id)}
+                onPress={() => handleLang(l.id)}
               >
                 <Text style={styles(Colors).langFlag}>{l.flag}</Text>
                 <Text style={[styles(Colors).langLabel, lang === l.id && styles(Colors).langLabelActive]}>{l.label}</Text>
@@ -131,11 +240,17 @@ export default function ParametresScreen({ navigation }) {
 
         {/* Notifications */}
         <Section Colors={Colors} title={s.notifications}>
-          <RowSwitch Colors={Colors} icon="cube-outline" label={s.notifOrders} value={notifOrders} onToggle={setNotifOrders} />
-          <View style={styles(Colors).rowDivider} />
-          <RowSwitch Colors={Colors} icon="pricetag-outline" label={s.notifPromos} value={notifPromos} onToggle={setNotifPromos} />
-          <View style={styles(Colors).rowDivider} />
-          <RowSwitch Colors={Colors} icon="phone-portrait-outline" label={s.notifSMS} value={notifSMS} onToggle={setNotifSMS} />
+          {loadingSettings ? (
+            <ActivityIndicator color={Colors.darkGreen} style={{ paddingVertical: 20 }} />
+          ) : (
+            <>
+              <RowSwitch Colors={Colors} icon="cube-outline" label={s.notifOrders} value={!!settings?.pushEnabled} onToggle={(v) => toggleSetting('pushEnabled', v)} />
+              <View style={styles(Colors).rowDivider} />
+              <RowSwitch Colors={Colors} icon="pricetag-outline" label={s.notifPromos} value={!!settings?.promoOptIn} onToggle={(v) => toggleSetting('promoOptIn', v)} />
+              <View style={styles(Colors).rowDivider} />
+              <RowSwitch Colors={Colors} icon="phone-portrait-outline" label={s.notifSMS} value={!!settings?.smsEnabled} onToggle={(v) => toggleSetting('smsEnabled', v)} />
+            </>
+          )}
         </Section>
 
         {/* Appearance */}
@@ -160,7 +275,7 @@ export default function ParametresScreen({ navigation }) {
           <View style={styles(Colors).rowDivider} />
           <RowLink Colors={Colors} icon="ellipse-outline" label={s.cookies} onPress={() => Alert.alert('Cookies', s.cookiesAlert)} />
           <View style={styles(Colors).rowDivider} />
-          <RowLink Colors={Colors} icon="bar-chart-outline" label={s.myData} onPress={() => Alert.alert('Données', s.dataAlert)} />
+          <RowLink Colors={Colors} icon="bar-chart-outline" label={s.myData} onPress={() => Alert.alert(s.dataAlertTitle, s.dataAlert)} />
         </Section>
 
         {/* Support */}
@@ -169,7 +284,7 @@ export default function ParametresScreen({ navigation }) {
           <View style={styles(Colors).rowDivider} />
           <RowLink Colors={Colors} icon="call-outline" label={s.contact} onPress={() => Linking.openURL('tel:+221338001234')} />
           <View style={styles(Colors).rowDivider} />
-          <RowLink Colors={Colors} icon="star-outline" label={s.rateApp} onPress={() => Alert.alert('Merci !', s.rateAlert)} />
+          <RowLink Colors={Colors} icon="star-outline" label={s.rateApp} onPress={() => Alert.alert(s.rateAlertTitle, s.rateAlert)} />
           <View style={styles(Colors).rowDivider} />
           <RowLink Colors={Colors} icon="bug-outline" label={s.reportBug} onPress={() => Linking.openURL('mailto:bugs@malaw.sn?subject=Bug%20App%20Malaw')} />
         </Section>
@@ -183,14 +298,7 @@ export default function ParametresScreen({ navigation }) {
             icon="trash-outline"
             label={s.deleteAccount}
             danger
-            onPress={() => Alert.alert(
-              s.deleteTitle,
-              s.deleteMsg,
-              [
-                { text: s.cancel, style: 'cancel' },
-                { text: s.contactSupport, onPress: () => Linking.openURL('mailto:support@malaw.sn?subject=Suppression%20compte') },
-              ]
-            )}
+            onPress={() => setDeleteOpen(true)}
           />
         </Section>
 
@@ -205,6 +313,65 @@ export default function ParametresScreen({ navigation }) {
           <Text style={styles(Colors).versionTagline}>{s.tagline}</Text>
         </View>
       </ScrollView>
+
+      {/* Suppression de compte : parcours complet dans l'app, le serveur
+          expose la route. L'e-mail au support ne laissait aucune trace
+          vérifiable de la demande. */}
+      <Modal visible={deleteOpen} transparent animationType="fade" onRequestClose={closeDelete}>
+        <KeyboardAvoidingView
+          style={styles(Colors).modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <View style={styles(Colors).modalCard}>
+            <View style={styles(Colors).modalIcon}>
+              <Ionicons name="warning-outline" size={26} color="#DC2626" />
+            </View>
+            <Text style={styles(Colors).modalTitle}>{s.deleteAccount}</Text>
+            <Text style={styles(Colors).modalWarning}>{s.deleteWarning}</Text>
+
+            <Text style={styles(Colors).modalLabel}>{s.deletePinLabel}</Text>
+            <TextInput
+              style={styles(Colors).modalInput}
+              value={deletePin}
+              onChangeText={(v) => { setDeletePin(v.replace(/\D/g, '')); setDeleteError(''); }}
+              placeholder={'•'.repeat(PIN_LENGTH)}
+              placeholderTextColor={Colors.placeholder}
+              keyboardType="number-pad"
+              maxLength={PIN_LENGTH}
+              secureTextEntry
+              editable={!deleting}
+            />
+
+            <Text style={styles(Colors).modalLabel}>{s.deleteReasonLabel}</Text>
+            <TextInput
+              style={styles(Colors).modalInput}
+              value={deleteReason}
+              onChangeText={setDeleteReason}
+              placeholder={s.deleteReasonPlaceholder}
+              placeholderTextColor={Colors.placeholder}
+              maxLength={500}
+              editable={!deleting}
+            />
+
+            {deleteError ? <Text style={styles(Colors).modalError}>{deleteError}</Text> : null}
+
+            <View style={styles(Colors).modalActions}>
+              <TouchableOpacity style={styles(Colors).modalCancelBtn} onPress={closeDelete} disabled={deleting}>
+                <Text style={styles(Colors).modalCancelText}>{s.cancel}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles(Colors).modalDangerBtn, deleting && { opacity: 0.7 }]}
+                onPress={confirmDelete}
+                disabled={deleting}
+              >
+                {deleting
+                  ? <ActivityIndicator color={Colors.white} />
+                  : <Text style={styles(Colors).modalDangerText}>{s.deleteConfirm}</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -240,4 +407,17 @@ const styles = (Colors) => StyleSheet.create({
   versionText: { fontSize: 12, fontFamily: Fonts.manrope.regular, color: Colors.placeholder },
   versionCopyright: { fontSize: 11, fontFamily: Fonts.manrope.regular, color: Colors.placeholder },
   versionTagline: { fontSize: 12, fontFamily: Fonts.manrope.semiBold, color: Colors.gold, textAlign: 'center' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', paddingHorizontal: 24 },
+  modalCard: { backgroundColor: Colors.white, borderRadius: 24, padding: 24, gap: 10 },
+  modalIcon: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#DC262615', justifyContent: 'center', alignItems: 'center', alignSelf: 'center' },
+  modalTitle: { fontSize: 18, fontFamily: Fonts.epilogue.bold, color: '#DC2626', textAlign: 'center' },
+  modalWarning: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: Colors.darkGray, textAlign: 'center', lineHeight: 20 },
+  modalLabel: { fontSize: 12, fontFamily: Fonts.manrope.bold, color: Colors.darkGreen, marginTop: 6 },
+  modalInput: { height: 50, backgroundColor: Colors.offWhite, borderRadius: 12, paddingHorizontal: 14, fontSize: 15, fontFamily: Fonts.manrope.semiBold, color: Colors.charcoal },
+  modalError: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: '#DC2626', marginTop: 4 },
+  modalActions: { flexDirection: 'row', gap: 12, marginTop: 12 },
+  modalCancelBtn: { flex: 1, height: 48, borderRadius: 100, borderWidth: 1.5, borderColor: Colors.mediumGray, justifyContent: 'center', alignItems: 'center' },
+  modalCancelText: { fontSize: 14, fontFamily: Fonts.manrope.bold, color: Colors.darkGray },
+  modalDangerBtn: { flex: 1.4, height: 48, borderRadius: 100, backgroundColor: '#DC2626', justifyContent: 'center', alignItems: 'center' },
+  modalDangerText: { fontSize: 14, fontFamily: Fonts.manrope.bold, color: Colors.white },
 });

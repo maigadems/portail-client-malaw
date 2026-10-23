@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, Animated, TouchableOpacity, AppState } from 'react-native';
+import { View, Text, StyleSheet, Animated, TouchableOpacity } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useCart } from '../context/CartContext';
+import { useActiveOrder } from '../context/OrderContext';
 import { getOrder, cancelOrder } from '../api/orders';
-import { subscribeToOrder } from '../api/realtime';
 import { Alert } from '../components/AppAlert';
 
 /**
@@ -53,7 +53,12 @@ export default function AttenteCuisineScreen({ navigation }) {
   const S = styles(C);
   const insets = useSafeAreaInsets();
   const { lastOrder, setLastOrder } = useCart();
-  const restaurantName = lastOrder?.restaurant?.name ?? 'Le restaurant';
+  // Le suivi (abonnement temps réel + sondage de secours) est tenu par le
+  // contexte : cet écran ne fait que lire la commande qu'il rafraîchit, pour
+  // qu'un seul canal soit ouvert pour toute l'app.
+  const { order: activeOrder, stopTracking } = useActiveOrder();
+  const order = activeOrder ?? lastOrder;
+  const restaurantName = order?.restaurant?.name ?? 'Le restaurant';
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
   const [seconds, setSeconds] = useState(0);
@@ -76,65 +81,50 @@ export default function AttenteCuisineScreen({ navigation }) {
     ).start();
 
     const timer = setInterval(() => setSeconds(s => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
-    if (!lastOrder?.id) return () => clearInterval(timer);
+  // La décision appartient au restaurant : il accepte (ou refuse) depuis sa
+  // plateforme web. On ne fait qu'observer le statut que le contexte
+  // rafraîchit — aucune avance automatique côté client.
+  const decided = accepted || refused;
+  useEffect(() => {
+    const status = order?.status;
+    if (!status || decided) return undefined;
 
-    let active = true;
-    let poll;
-    let unsubscribe = () => {};
+    if (status === 'CANCELLED') {
+      setRefused(true);
+      return undefined;
+    }
+    if (status !== 'PENDING') {
+      setAccepted(true);
+      // Laisse voir la confirmation avant de basculer sur l'écran suivant.
+      const jump = setTimeout(() => navigation.replace('ConfirmationCommande'), 1500);
+      return () => clearTimeout(jump);
+    }
+    return undefined;
+  }, [order?.status, decided, navigation]);
 
-    const stop = () => {
-      clearInterval(poll);
-      unsubscribe();
-    };
+  // Le contexte relâche une commande qui n'est plus suivable (annulée,
+  // archivée) sans dire pourquoi. Plutôt que de laisser le client devant une
+  // attente sans fin, on demande une dernière fois son état au serveur.
+  const finalCheckDone = useRef(false);
+  useEffect(() => {
+    const id = lastOrder?.id;
+    if (!id || activeOrder || decided || finalCheckDone.current) return undefined;
+    finalCheckDone.current = true;
 
-    // La décision appartient au restaurant : il accepte (ou refuse) depuis sa
-    // plateforme web. On ne fait qu'observer — aucune avance automatique côté
-    // client, contrairement à la version précédente qui basculait de force
-    // après 15 s pour compenser l'absence de plateforme restaurateur.
-    const refresh = async () => {
-      try {
-        const o = await getOrder(lastOrder.id);
-        if (!active || !o?.status) return;
-        setLastOrder(o);
-
-        if (o.status === 'CANCELLED') {
-          stop();
-          setRefused(true);
-          return;
-        }
-        if (o.status !== 'PENDING') {
-          stop();
-          setAccepted(true);
-          setTimeout(() => {
-            if (active) navigation.replace('ConfirmationCommande');
-          }, 1500);
-        }
-      } catch {} // hors-ligne : on garde l'écran d'attente
-    };
-
-    // Temps réel : le restaurant accepte, le client le voit immédiatement.
-    unsubscribe = subscribeToOrder(lastOrder.id, refresh);
-    refresh();
-    // Filet de sécurité si le WebSocket est indisponible.
-    poll = setInterval(refresh, 5000);
-
-    const appStateSub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') refresh();
-    });
-
-    return () => {
-      active = false;
-      clearInterval(timer);
-      stop();
-      appStateSub.remove();
-    };
-  }, [lastOrder?.id]);
+    let alive = true;
+    getOrder(id)
+      .then((o) => { if (alive && o?.status) setLastOrder(o); })
+      .catch(() => {}); // hors-ligne : on garde l'écran d'attente
+    return () => { alive = false; };
+  }, [activeOrder, lastOrder?.id, decided, setLastOrder]);
 
   // Annulation réelle : PATCH /orders/:id/cancel. Le backend l'accepte tant
   // que la commande n'est pas partie en livraison.
   const handleCancel = () => {
-    if (!lastOrder?.id) { navigation.navigate('Main'); return; }
+    if (!order?.id) { navigation.navigate('Main'); return; }
     Alert.alert(
       'Annuler la commande',
       'Voulez-vous vraiment annuler cette commande ?',
@@ -146,8 +136,11 @@ export default function AttenteCuisineScreen({ navigation }) {
           onPress: async () => {
             setCancelling(true);
             try {
-              const cancelled = await cancelOrder(lastOrder.id, 'Annulée par le client');
+              const cancelled = await cancelOrder(order.id, 'Annulée par le client');
               setLastOrder(cancelled);
+              // Rien à suivre sur une commande annulée : on libère le canal
+              // temps réel au lieu de le laisser tourner à vide.
+              await stopTracking();
               navigation.navigate('Main');
             } catch (e) {
               Alert.alert('Annulation impossible', e?.message ?? 'Réessayez dans un instant.');
@@ -176,7 +169,7 @@ export default function AttenteCuisineScreen({ navigation }) {
         <Text style={S.orderIdLabel}>Commande</Text>
         <View style={S.orderIdBadge}>
           <Text style={S.orderIdText}>
-            {lastOrder?.id ? `#${String(lastOrder.id).slice(-8).toUpperCase()}` : '—'}
+            {order?.id ? `#${String(order.id).slice(-8).toUpperCase()}` : '—'}
           </Text>
         </View>
       </View>
@@ -219,7 +212,7 @@ export default function AttenteCuisineScreen({ navigation }) {
             ? `${restaurantName} n'a pas pu prendre votre commande. Si vous avez déjà payé, vous serez remboursé.`
             : accepted
               ? `${restaurantName} prépare votre commande. Redirection en cours...`
-              : `${restaurantName} examine votre commande. Cela prend généralement moins d'une minute.`}
+              : `${restaurantName} examine votre commande.`}
         </Text>
         {!accepted && !refused && (
           <Text style={S.timer}>{formatTime(seconds)}</Text>
@@ -228,7 +221,7 @@ export default function AttenteCuisineScreen({ navigation }) {
 
       {/* Progress stages */}
       <View style={S.stagesCard}>
-        {buildStages(lastOrder).map((stage) => (
+        {buildStages(order).map((stage) => (
           <View key={stage.id} style={S.stageRow}>
             <View style={[S.stageIcon, stage.done && S.stageIconDone, stage.active && S.stageIconActive]}>
               <Text style={S.stageIconEmoji}>{stage.icon}</Text>

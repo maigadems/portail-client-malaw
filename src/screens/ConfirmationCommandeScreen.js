@@ -7,6 +7,57 @@ import { useColors } from '../context/ThemeContext';
 import { useCart } from '../context/CartContext';
 import { PAYMENT_METHODS, paymentById } from '../constants/payments';
 
+/**
+ * Délai de livraison tel que le serveur le connaît. Rien n'est inventé :
+ * tant qu'aucune échéance n'est posée (le restaurant n'a pas encore accepté),
+ * la ligne disparaît plutôt que d'afficher un « 25-35 min » décoratif.
+ */
+function formatEta(order) {
+  const raw = order?.estimatedDeliveryAt ?? order?.estimatedReadyAt;
+  if (!raw) return null;
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return null;
+  const minutes = Math.round((at.getTime() - Date.now()) / 60000);
+  if (minutes <= 0) return "D'un instant à l'autre";
+  return `~${minutes} min`;
+}
+
+/**
+ * Étapes déduites du statut réel plutôt que figées : la première était
+ * marquée comme faite quel que soit l'état de la commande.
+ */
+function buildSteps(order) {
+  const status = order?.status ?? 'PENDING';
+  const paid = order?.paymentStatus === 'PAID' || order?.paymentStatus === 'AUTHORIZED';
+  const cash = order?.paymentMethod === 'CASH';
+  const reached = (...list) => list.includes(status);
+  return [
+    {
+      icon: paid ? '✅' : '🧾',
+      // En espèces, « paiement en attente » serait alarmant sans raison :
+      // le règlement se fait à la remise, par construction.
+      text: paid
+        ? 'Paiement confirmé'
+        : cash
+          ? 'Commande enregistrée · paiement à la livraison'
+          : 'Commande enregistrée · paiement en attente',
+      done: paid || cash,
+    },
+    {
+      icon: '👨‍🍳',
+      text: reached('PREPARING', 'READY_FOR_PICKUP', 'IN_TRANSIT', 'DELIVERED')
+        ? 'Le restaurant prépare votre commande'
+        : "En attente d'acceptation par le restaurant",
+      done: reached('PREPARING', 'READY_FOR_PICKUP', 'IN_TRANSIT', 'DELIVERED'),
+    },
+    {
+      icon: '🛵',
+      text: reached('IN_TRANSIT', 'DELIVERED') ? 'Commande en route' : "Coursier pas encore assigné",
+      done: reached('IN_TRANSIT', 'DELIVERED'),
+    },
+  ];
+}
+
 export default function ConfirmationCommandeScreen({ navigation }) {
   const C = useColors();
   const S = styles(C);
@@ -15,6 +66,9 @@ export default function ConfirmationCommandeScreen({ navigation }) {
   const restaurantName = lastOrder?.restaurant?.name ?? 'le restaurant';
   const itemCount = lastOrder?.items?.reduce((s, i) => s + (i.quantity ?? 1), 0) ?? 0;
   const payMethod = PAYMENT_METHODS.find((m) => m.api === lastOrder?.paymentMethod) ?? paymentById('wave');
+  const eta = formatEta(lastOrder);
+  const steps = buildSteps(lastOrder);
+  const paid = lastOrder?.paymentStatus === 'PAID' || lastOrder?.paymentStatus === 'AUTHORIZED';
   const checkScale = useRef(new Animated.Value(0)).current;
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const confetti1 = useRef(new Animated.Value(-20)).current;
@@ -60,8 +114,12 @@ export default function ConfirmationCommandeScreen({ navigation }) {
       >
         <Animated.View style={[S.content, { opacity: contentOpacity }]}>
           <Text style={S.title}>Commande confirmée !</Text>
+          {/* Le restaurant doit encore accepter : promettre le démarrage de
+              la préparation serait faux tant que le statut est PENDING. */}
           <Text style={S.subtitle}>
-            Votre commande a été transmise à {restaurantName} et la préparation va commencer.
+            Votre commande a été transmise à {restaurantName}.
+            {!paid && payMethod.online ? ' Elle attend son règlement.' : ''}
+            {!payMethod.online ? ' Vous réglerez le livreur à la remise.' : ''}
           </Text>
 
           {/* Order card */}
@@ -75,18 +133,21 @@ export default function ConfirmationCommandeScreen({ navigation }) {
             </View>
             <View style={S.orderCardDivider} />
             <View style={S.orderCardStats}>
-              {/* Total payé */}
+              {/* Montant — « payé » seulement si le serveur le dit. */}
               <View style={S.orderCardStat}>
                 <Text style={S.orderCardStatIcon}>💰</Text>
-                <Text style={S.orderCardStatLabel}>Total payé</Text>
+                <Text style={S.orderCardStatLabel}>{paid ? 'Total payé' : 'Total à payer'}</Text>
                 <Text style={S.orderCardStatValue}>{(lastOrder?.total ?? 0).toLocaleString()} FCFA</Text>
               </View>
-              {/* Livraison estimée */}
-              <View style={S.orderCardStat}>
-                <Ionicons name="time-outline" size={18} color={C.charcoal} />
-                <Text style={S.orderCardStatLabel}>Livraison est.</Text>
-                <Text style={S.orderCardStatValue}>25-35 min</Text>
-              </View>
+              {/* Livraison estimée — affichée uniquement si le serveur a posé
+                  une échéance. */}
+              {eta ? (
+                <View style={S.orderCardStat}>
+                  <Ionicons name="time-outline" size={18} color={C.charcoal} />
+                  <Text style={S.orderCardStatLabel}>Livraison est.</Text>
+                  <Text style={S.orderCardStatValue}>{eta}</Text>
+                </View>
+              ) : null}
               {/* Moyen de paiement réellement choisi */}
               <View style={S.orderCardStat}>
                 {payMethod.logo ? (
@@ -102,12 +163,8 @@ export default function ConfirmationCommandeScreen({ navigation }) {
 
           {/* What happens next */}
           <View style={S.nextStepsCard}>
-            <Text style={S.nextStepsTitle}>Prochaines étapes</Text>
-            {[
-              { icon: '👨‍🍳', text: 'Le restaurant prépare votre commande', done: true },
-              { icon: '🛵', text: 'Un coursier sera assigné bientôt', done: false },
-              { icon: '📍', text: `Livraison : ${lastOrder?.deliveryAddress?.label ?? 'votre adresse'}`, done: false },
-            ].map((step, i) => (
+            <Text style={S.nextStepsTitle}>Où en est votre commande</Text>
+            {steps.map((step, i) => (
               <View key={i} style={S.nextStepRow}>
                 <View style={[S.nextStepIcon, step.done && S.nextStepIconDone]}>
                   <Text style={S.nextStepEmoji}>{step.icon}</Text>
@@ -117,11 +174,9 @@ export default function ConfirmationCommandeScreen({ navigation }) {
             ))}
           </View>
 
-          {/* Notification note */}
-          <View style={S.notifNote}>
-            <Text style={S.notifNoteIcon}>🔔</Text>
-            <Text style={S.notifNoteText}>Vous recevrez des notifications à chaque étape de votre commande.</Text>
-          </View>
+          {/* La promesse « vous recevrez des notifications à chaque étape »
+              a été retirée : aucune notification n'est enregistrée par
+              l'app. Le suivi se fait depuis l'écran de suivi. */}
         </Animated.View>
       </ScrollView>
 
@@ -173,9 +228,6 @@ const styles = (C) => StyleSheet.create({
   nextStepEmoji: { fontSize: 18 },
   nextStepText: { flex: 1, fontSize: 13, fontFamily: Fonts.manrope.regular, color: C.placeholder },
   nextStepTextDone: { color: C.darkGreen, fontFamily: Fonts.manrope.semiBold },
-  notifNote: { flexDirection: 'row', gap: 10, backgroundColor: C.offWhite, borderRadius: 12, padding: 12 },
-  notifNoteIcon: { fontSize: 14 },
-  notifNoteText: { flex: 1, fontSize: 12, fontFamily: Fonts.manrope.regular, color: C.placeholder, lineHeight: 18 },
   bottomActions: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.white, paddingHorizontal: 24, paddingTop: 12, gap: 8, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 10 },
   trackBtn: { height: 56, backgroundColor: C.darkGreen, borderRadius: 100, justifyContent: 'center', alignItems: 'center' },
   trackBtnText: { color: C.white, fontSize: 16, fontFamily: Fonts.manrope.bold },

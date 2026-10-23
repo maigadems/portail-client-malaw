@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Fonts } from '../constants/theme';
@@ -7,7 +7,12 @@ import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import { useCart } from '../context/CartContext';
 import { createDispute, DISPUTE_CATEGORIES, DISPUTE_STATUS_LABELS } from '../api/disputes';
+import { listMyOrders } from '../api/orders';
 import { Alert } from '../components/AppAlert';
+
+// Nombre de commandes proposées au choix quand l'écran est ouvert sans
+// commande : au-delà, le client ne signale plus « à chaud ».
+const PICKER_SIZE = 10;
 
 export default function LitigeScreen({ navigation, route }) {
   const C = useColors();
@@ -16,16 +21,48 @@ export default function LitigeScreen({ navigation, route }) {
   const l = t.litige;
   const insets = useSafeAreaInsets();
   const { lastOrder } = useCart();
-  // La commande vient de l'écran appelant (Suivi) ; `lastOrder` sert de repli
-  // quand on arrive ici autrement.
-  const order = route?.params?.order ?? lastOrder ?? null;
+  // La commande vient de l'écran appelant (Suivi, Détail de commande) ;
+  // `lastOrder` sert de repli quand on arrive ici autrement.
+  const presetOrder = route?.params?.order ?? lastOrder ?? null;
 
   const [category, setCategory] = useState(null);
   const [description, setDescription] = useState('');
   const [dispute, setDispute] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const canSubmit = !!order?.id && !!category && description.trim().length >= 10;
+  // Sans commande fournie, l'écran affichait « aucune commande » et n'offrait
+  // aucune issue : on va chercher les dernières commandes pour que le client
+  // désigne lui-même celle qui pose problème.
+  const [recent, setRecent] = useState([]);
+  const [recentLoading, setRecentLoading] = useState(!presetOrder);
+  const [recentError, setRecentError] = useState('');
+  const [picked, setPicked] = useState(null);
+
+  const order = presetOrder ?? picked;
+
+  const loadRecent = async () => {
+    setRecentLoading(true);
+    setRecentError('');
+    try {
+      const { items } = await listMyOrders({ limit: PICKER_SIZE });
+      setRecent(items);
+      // Une seule commande : inutile de faire choisir.
+      if (items.length === 1) setPicked(items[0]);
+    } catch (e) {
+      setRecentError(e?.message ?? l.noOrder);
+    } finally {
+      setRecentLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (presetOrder) return;
+    loadRecent();
+    // Une seule tentative au montage : la relance passe par « Réessayer ».
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetOrder]);
+
+  const canSubmit = !!order?.id && !!category && description.trim().length >= 10 && !loading;
 
   const handleSubmit = async () => {
     if (!order?.id) {
@@ -70,8 +107,13 @@ export default function LitigeScreen({ navigation, route }) {
           <Text style={S.refundNoteIcon}>💰</Text>
           <Text style={S.refundNoteText}>{l.refundNote}</Text>
         </View>
-        <TouchableOpacity style={S.primaryBtn} onPress={() => navigation.replace('Main')}>
-          <Text style={S.primaryBtnText}>{l.backHome}</Text>
+        {/* Le dossier existe côté serveur : on montre tout de suite où en
+            suivre l'issue, sinon le client n'y revient jamais. */}
+        <TouchableOpacity style={S.primaryBtn} onPress={() => navigation.replace('MesReclamations')}>
+          <Text style={S.primaryBtnText}>{l.trackClaims}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => navigation.replace('Main')}>
+          <Text style={S.contactLink}>{l.backHome}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -90,13 +132,58 @@ export default function LitigeScreen({ navigation, route }) {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 140, gap: 16 }}>
 
         {/* Commande concernée — le litige lui est rattaché côté serveur */}
-        {order?.id && (
+        {presetOrder?.id ? (
           <View style={S.orderCard}>
             <Text style={S.orderCardLabel}>{l.orderLabel}</Text>
-            <Text style={S.orderCardId}>#{String(order.id).slice(-8).toUpperCase()}</Text>
-            {order.restaurant?.name && (
-              <Text style={S.orderCardMeta}>{order.restaurant.name}</Text>
+            <Text style={S.orderCardId}>#{String(presetOrder.id).slice(-8).toUpperCase()}</Text>
+            {presetOrder.restaurant?.name && (
+              <Text style={S.orderCardMeta}>{presetOrder.restaurant.name}</Text>
             )}
+          </View>
+        ) : recentLoading ? (
+          <View style={S.pickerLoading}><ActivityIndicator color={C.darkGreen} /></View>
+        ) : recentError ? (
+          <View style={S.sectionBlock}>
+            <Text style={S.pickerError}>{recentError}</Text>
+            <TouchableOpacity style={S.retryBtn} onPress={loadRecent}>
+              <Text style={S.retryBtnText}>{l.retry}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : recent.length === 0 ? (
+          <View style={S.orderCard}>
+            <Text style={S.orderCardMeta}>{l.noOrder}</Text>
+          </View>
+        ) : (
+          <View style={S.sectionBlock}>
+            <Text style={S.sectionTitle}>{l.orderLabel}</Text>
+            <View style={S.categoryList}>
+              {recent.map((candidate) => {
+                const selected = picked?.id === candidate.id;
+                const date = candidate.createdAt
+                  ? new Date(candidate.createdAt).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+                  : '';
+                return (
+                  <TouchableOpacity
+                    key={candidate.id}
+                    style={[S.categoryItem, selected && S.categoryItemSelected]}
+                    onPress={() => setPicked(candidate)}
+                    activeOpacity={0.8}
+                  >
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <Text style={[S.categoryLabel, selected && S.categoryLabelSelected]}>
+                        {candidate.restaurant?.name ?? `#${String(candidate.id).slice(-8).toUpperCase()}`}
+                      </Text>
+                      <Text style={S.orderCardMeta}>
+                        {date}{candidate.total != null ? ` · ${candidate.total.toLocaleString()} FCFA` : ''}
+                      </Text>
+                    </View>
+                    <View style={[S.radio, selected && S.radioSelected]}>
+                      {selected && <View style={S.radioInner} />}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
         )}
 
@@ -213,6 +300,10 @@ const styles = (C) => StyleSheet.create({
   radioSelected: { borderColor: C.gold, backgroundColor: C.gold },
   radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.white },
   hint: { fontSize: 12, fontFamily: Fonts.manrope.regular, color: C.placeholder, textAlign: 'center' },
+  pickerLoading: { paddingVertical: 24, alignItems: 'center' },
+  pickerError: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: '#DC2626', textAlign: 'center' },
+  retryBtn: { alignSelf: 'center', paddingHorizontal: 24, paddingVertical: 12, backgroundColor: C.darkGreen, borderRadius: 100 },
+  retryBtnText: { color: C.white, fontSize: 14, fontFamily: Fonts.manrope.bold },
   sectionBlock: { gap: 10 },
   sectionTitle: { fontSize: 16, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
   descInput: { backgroundColor: C.white, borderRadius: 16, padding: 16, minHeight: 160, fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.charcoal, borderWidth: 1.5, borderColor: C.mediumGray },

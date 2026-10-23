@@ -1,111 +1,75 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking, AppState } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Linking,
+  Image,
+  ActivityIndicator,
+} from 'react-native';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import TopBar from '../components/TopBar';
 import BottomNavBar from '../components/BottomNavBar';
 import { useCart } from '../context/CartContext';
-import { getOrder } from '../api/orders';
-import { subscribeToOrder } from '../api/realtime';
-import { TRACKING_STEP_IDS, resolveTrackingStep } from '../api/tracking';
+import { useActiveOrder } from '../context/OrderContext';
+import { TRACKING_STEP_IDS, resolveTrackingStep, isOrderTrackable } from '../api/tracking';
 import { getRoute } from '../api/geo';
+import { staticMapUri } from '../api/staticMap';
 import { PAYMENT_METHODS } from '../constants/payments';
+import { describeVehicle, vehicleIcon } from '../api/reviews';
 import { Alert } from '../components/AppAlert';
 
-// Repli pour un accès direct à l'écran (deep-link, aucune commande dans le
-// panier) : simule une commande en recherche de livreur.
-const FALLBACK_ORDER = {
-  id: 'DEMO',
-  status: 'READY_FOR_PICKUP',
-  delivery: null,
-  deliveryCode: '4821',
-  total: 12500,
-  items: [
-    { name: 'Thiéboudiène Royal', unitPrice: 4500, quantity: 1 },
-    { name: 'Crevettes grillées', unitPrice: 6500, quantity: 1 },
-  ],
+/**
+ * Le retour ne doit jamais renvoyer dans le tunnel de commande (Récap,
+ * Paiement...) qui a mené ici : une fois la commande passée et le panier
+ * vidé, ces écrans n'ont plus de sens. On réinitialise la pile vers l'onglet
+ * Commandes du tab bar principal.
+ */
+const goToHistoryFrom = (navigation) => () => {
+  navigation.reset({
+    index: 0,
+    routes: [{ name: 'Main', params: { initialTab: 'Commandes' } }],
+  });
 };
+
+/** Évite de recharger l'image de carte pour un déplacement de quelques mètres. */
+const roundCoord = (value) => (value == null ? null : Math.round(value * 10000) / 10000);
 
 export default function SuiviScreen({ navigation }) {
   const C = useColors();
   const S = styles(C);
   const { t } = useLang();
   const tr = t.tracking;
-  const insets = useSafeAreaInsets();
   const { lastOrder } = useCart();
-  const [order, setOrder] = useState(lastOrder ?? FALLBACK_ORDER);
+  const { order: activeOrder, courierPosition, loading, trackOrder } = useActiveOrder();
 
-  // Resynchronise si l'identité de la commande suivie change (ex. on revient
-  // à l'historique et on ouvre une autre commande sans démonter l'écran).
+  // La commande ouverte depuis l'historique n'est pas forcément celle que le
+  // contexte suivait : on la lui confie pour que l'abonnement temps réel se
+  // rattache à elle — un seul abonnement, tenu par le contexte.
   useEffect(() => {
-    setOrder(lastOrder ?? FALLBACK_ORDER);
-  }, [lastOrder?.id]);
-
-  // Rafraîchit périodiquement le statut de la commande — c'est l'unique
-  // source de vérité pour savoir si un livreur a été assigné.
-  useEffect(() => {
-    if (!lastOrder?.id) return;
-    // Commande déjà close (ouverte depuis l'historique) : rien à
-    // rafraîchir ni à simuler, son état final est déjà connu.
-    if (lastOrder.status === 'DELIVERED' || lastOrder.status === 'CANCELLED') {
-      setOrder(lastOrder);
-      return;
+    if (lastOrder?.id && lastOrder.id !== activeOrder?.id && isOrderTrackable(lastOrder)) {
+      void trackOrder(lastOrder);
     }
+  }, [lastOrder?.id, activeOrder?.id, trackOrder]);
 
-    let active = true;
-    let poll;
-    let unsubscribe = () => {};
-
-    const stopUpdates = () => {
-      clearInterval(poll);
-      unsubscribe();
-    };
-
-    const refresh = async () => {
-      try {
-        const fresh = await getOrder(lastOrder.id);
-        if (!active || !fresh) return;
-        setOrder(fresh);
-        // Une fois la commande livrée ou annulée, plus rien à suivre.
-        if (fresh.status === 'DELIVERED' || fresh.status === 'CANCELLED') {
-          stopUpdates();
-        }
-      } catch {} // hors-ligne : on garde le dernier état connu
-    };
-
-    // Temps réel : le serveur pousse chaque changement de statut (livreur
-    // assigné, en livraison, livré...) — la page se met à jour immédiatement,
-    // sans attendre le polling ni devoir rouvrir l'écran.
-    unsubscribe = subscribeToOrder(lastOrder.id, refresh);
-
-    refresh();
-    // Polling de secours (WS indisponible / réseau instable). Seule source de
-    // vérité : le serveur — aucune étape n'est simulée côté client.
-    poll = setInterval(refresh, 5000);
-
-    // Retour de l'app au premier plan : on resynchronise tout de suite (le WS
-    // a pu être coupé pendant la mise en arrière-plan).
-    const appStateSub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') refresh();
-    });
-
-    return () => {
-      active = false;
-      stopUpdates();
-      appStateSub.remove();
-    };
-  }, [lastOrder?.id]);
+  // Le contexte cesse de suivre une commande terminée ; `lastOrder` garde
+  // alors le dernier état connu du serveur, qui reste une donnée réelle et
+  // permet d'afficher le récapitulatif de fin. Aucune commande fabriquée :
+  // sans l'un ni l'autre, l'écran dit simplement qu'il n'y a rien à suivre.
+  const order = activeOrder ?? lastOrder ?? null;
 
   // Trajet restant du livreur jusqu'au client : distance et durée réelles.
-  // Recalculé quand la position du livreur bouge (elle arrive par le suivi
-  // périodique du livreur, relayé sur la commande).
   const [trip, setTrip] = useState(null);
-  const courierLat = order?.delivery?.lastLat;
-  const courierLng = order?.delivery?.lastLng;
-  const destLat = order?.deliveryAddress?.latitude;
-  const destLng = order?.deliveryAddress?.longitude;
+  // Position poussée en temps réel d'abord ; `delivery.lastLat/lastLng` n'est
+  // qu'un repli (dernier point enregistré en base, jusqu'à une minute vieux).
+  const courierLat = courierPosition?.latitude ?? order?.delivery?.lastLat ?? null;
+  const courierLng = courierPosition?.longitude ?? order?.delivery?.lastLng ?? null;
+  const destLat = order?.deliveryAddress?.latitude ?? null;
+  const destLng = order?.deliveryAddress?.longitude ?? null;
 
   useEffect(() => {
     if (courierLat == null || courierLng == null || destLat == null || destLng == null) {
@@ -129,6 +93,76 @@ export default function SuiviScreen({ navigation }) {
         minute: '2-digit',
       })
     : '—';
+
+  // Carte statique servie par notre API (le jeton Mapbox reste côté serveur) :
+  // aucune dépendance native supplémentaire, et l'image se recharge dès que la
+  // position poussée change. On centre sur le livreur quand il est connu,
+  // sinon sur l'adresse de livraison — qui reste une information utile.
+  const [mapSource, setMapSource] = useState(null);
+  const [mapFailed, setMapFailed] = useState(false);
+  const mapLat = roundCoord(courierLat ?? destLat);
+  const mapLng = roundCoord(courierLng ?? destLng);
+  const mapToLat = courierLat != null ? roundCoord(destLat) : null;
+  const mapToLng = courierLng != null ? roundCoord(destLng) : null;
+
+  useEffect(() => {
+    if (mapLat == null || mapLng == null) {
+      setMapSource(null);
+      return undefined;
+    }
+    let active = true;
+    setMapFailed(false);
+    staticMapUri({
+      latitude: mapLat,
+      longitude: mapLng,
+      toLatitude: mapToLat ?? undefined,
+      toLongitude: mapToLng ?? undefined,
+      width: 640,
+      height: 320,
+    })
+      .then((source) => { if (active) setMapSource(source); })
+      .catch(() => { if (active) setMapSource(null); });
+    return () => { active = false; };
+  }, [mapLat, mapLng, mapToLat, mapToLng]);
+
+  // Fraîcheur de la position : le client doit pouvoir juger si le point
+  // affiché date de dix secondes ou de dix minutes.
+  const positionTime = courierPosition?.timestamp ?? order?.delivery?.lastLocAt ?? null;
+  const positionLabel = positionTime
+    ? new Date(positionTime).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  // Chargement initial du contexte : on ne conclut pas trop vite à l'absence
+  // de commande, sinon l'écran clignote « rien à suivre » au démarrage.
+  if (!order) {
+    return (
+      <View style={S.container}>
+        <TopBar title={tr.title} showBack onBackPress={goToHistoryFrom(navigation)} />
+        <View style={S.emptyWrap}>
+          {loading ? (
+            <ActivityIndicator color={C.darkGreen} />
+          ) : (
+            <>
+              <Text style={S.emptyIcon}>📦</Text>
+              <Text style={S.emptyTitle}>
+                {tr.noActiveOrderTitle}
+              </Text>
+              <Text style={S.emptySub}>
+                {tr.noActiveOrderSub}
+              </Text>
+              <TouchableOpacity
+                style={S.emptyBtn}
+                onPress={goToHistoryFrom(navigation)}
+              >
+                <Text style={S.emptyBtnText}>{tr.backToHistory}</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+        <BottomNavBar activeTab="Commandes" onTabPress={goToHistoryFrom(navigation)} />
+      </View>
+    );
+  }
 
   const { currentStepId, courierAssigned } = resolveTrackingStep(order);
   const isFinished = order.status === 'DELIVERED' || order.status === 'CANCELLED';
@@ -158,19 +192,17 @@ export default function SuiviScreen({ navigation }) {
   // delivery. On normalise pour que le rendu ne se soucie pas de l'origine.
   const courierName = courier?.courier?.name ?? courier?.courierName ?? tr.courier;
   const courierPhone = courier?.courier?.phone ?? courier?.phone ?? null;
+  // Identité enrichie (GET /orders/:id → delivery.courier) : photo, véhicule
+  // et note agrégée (`rating` vaut null tant que personne ne l'a noté).
+  // Chaque ligne est masquée si le serveur ne fournit rien — on n'invente pas.
+  const courierProfile = courier?.courier ?? null;
+  const courierAvatarUrl = courierProfile?.avatarUrl ?? null;
+  const courierVehicle = describeVehicle(courierProfile);
+  const courierVehicleIcon = vehicleIcon(courierProfile);
+  const courierRating = courierProfile?.rating ?? null;
+  const courierRatingCount = courierProfile?.ratingCount ?? 0;
 
-  // Le retour ne doit jamais renvoyer dans le tunnel de commande (Récap,
-  // Paiement...) qui a mené ici — une fois la commande passée et le panier
-  // vidé, ces écrans n'ont plus de sens. On réinitialise la pile vers
-  // l'onglet Commandes du tab bar principal (Main), qui affiche la même
-  // page que "Historique" mais avec la navbar — jamais la route "Historique"
-  // du stack (écran nu, sans navbar, prévu pour un autre usage).
-  const goToHistory = () => {
-    navigation.reset({
-      index: 0,
-      routes: [{ name: 'Main', params: { initialTab: 'Commandes' } }],
-    });
-  };
+  const goToHistory = goToHistoryFrom(navigation);
 
   const callCourier = () => {
     if (!courierPhone) {
@@ -232,6 +264,29 @@ export default function SuiviScreen({ navigation }) {
               </View>
             </View>
 
+            {/* Carte — position du livreur (marqueur vert) et adresse de
+                livraison (marqueur doré). L'image vient de notre API : si le
+                serveur n'a pas de jeton Mapbox il répond 204, ce que <Image>
+                signale par onError — on retombe alors sur le texte plutôt
+                que sur un cadre vide. */}
+            {mapSource && !mapFailed ? (
+              <View style={S.mapSection}>
+                <Image
+                  source={mapSource}
+                  style={S.mapImage}
+                  resizeMode="cover"
+                  onError={() => setMapFailed(true)}
+                />
+                <View style={S.mapLegend}>
+                  <Text style={S.mapLegendText}>
+                    {courierLat != null
+                      ? `🛵 ${tr.courier}${positionLabel ? ` · ${positionLabel}` : ''}`
+                      : `📍 ${tr.deliveryAddressLabel}`}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
             {/* Status tracker */}
             <View style={S.trackerSection}>
               <View style={S.trackerCard}>
@@ -274,12 +329,21 @@ export default function SuiviScreen({ navigation }) {
                 <View style={S.courierCard}>
                   <View style={S.courierInfo}>
                     <View style={S.courierAvatarBg}>
-                      <Text style={S.courierAvatarEmoji}>🧑🏾‍🦱</Text>
+                      {courierAvatarUrl
+                        ? <Image source={{ uri: courierAvatarUrl }} style={S.courierAvatarImg} />
+                        : <Text style={S.courierAvatarEmoji}>🧑🏾‍🦱</Text>}
                     </View>
                     <View style={S.courierTextBlock}>
                       <Text style={S.courierName}>{courierName}</Text>
-                      <Text style={S.courierSub}>{tr.courier} • ⭐ {courier?.rating ?? '—'}</Text>
-                      <Text style={S.courierVehicle}>{courier?.vehicle ?? ''}</Text>
+                      <Text style={S.courierSub}>
+                        {tr.courier}
+                        {courierRating != null ? ` • ⭐ ${courierRating} (${courierRatingCount})` : ''}
+                      </Text>
+                      {courierVehicle ? (
+                        <Text style={S.courierVehicle}>
+                          {courierVehicleIcon ? `${courierVehicleIcon} ` : ''}{courierVehicle}
+                        </Text>
+                      ) : null}
                     </View>
                   </View>
                   <TouchableOpacity style={S.callBtn} onPress={callCourier}>
@@ -368,7 +432,18 @@ export default function SuiviScreen({ navigation }) {
 
       {/* Barre fixe */}
       <View style={S.actionBar}>
-        {isFinished && (
+        {/* Commande livrée et pas encore évaluée : proposer l'évaluation
+            (restaurant + livreur). `order.review` est exposé par le serveur
+            uniquement pour ce test ; l'écran d'évaluation gère quand même le
+            409 si deux appareils évaluent en même temps. */}
+        {order.status === 'DELIVERED' && order?.id && !order.review ? (
+          <TouchableOpacity
+            style={[S.backToHistoryBtn, { flex: 1 }]}
+            onPress={() => navigation.navigate('Evaluation', { orderId: order.id })}
+          >
+            <Text style={S.backToHistoryBtnText}>{tr.rateOrder}</Text>
+          </TouchableOpacity>
+        ) : isFinished && (
           <TouchableOpacity style={[S.backToHistoryBtn, { flex: 1 }]} onPress={goToHistory}>
             <Text style={S.backToHistoryBtnText}>{tr.backToHistory}</Text>
           </TouchableOpacity>
@@ -376,9 +451,8 @@ export default function SuiviScreen({ navigation }) {
         {/* Un litige se rattache toujours à une commande précise : on la passe
             à l'écran, qui la transmet à POST /disputes/orders/:id. Le bouton
             reste utile après livraison (commande incomplète, qualité...) —
-            c'est même le cas le plus fréquent. Une commande de repli (DEMO,
-            accès par deep-link) n'a pas d'existence serveur : pas de litige. */}
-        {order?.id && order.id !== 'DEMO' && (
+            c'est même le cas le plus fréquent. */}
+        {order?.id && (
           <TouchableOpacity
             style={[S.litigeBtn, { flex: 1 }]}
             onPress={() => navigation.navigate('Litige', { order })}
@@ -436,6 +510,64 @@ const styles = (C) => StyleSheet.create({
     width: 1,
     height: 40,
     backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  mapSection: {
+    marginHorizontal: 24,
+    marginTop: 16,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: C.offWhite,
+  },
+  mapImage: {
+    width: '100%',
+    height: 180,
+  },
+  mapLegend: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: C.offWhite,
+  },
+  mapLegendText: {
+    fontSize: 12,
+    fontFamily: Fonts.manrope.semiBold,
+    color: C.darkGray,
+  },
+  emptyWrap: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+    gap: 12,
+  },
+  emptyIcon: {
+    fontSize: 46,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontFamily: Fonts.epilogue.bold,
+    color: C.darkGreen,
+    textAlign: 'center',
+  },
+  emptySub: {
+    fontSize: 14,
+    fontFamily: Fonts.manrope.regular,
+    color: C.placeholder,
+    textAlign: 'center',
+    lineHeight: 21,
+  },
+  emptyBtn: {
+    marginTop: 8,
+    height: 50,
+    paddingHorizontal: 26,
+    borderRadius: 100,
+    backgroundColor: C.darkGreen,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emptyBtnText: {
+    fontSize: 15,
+    fontFamily: Fonts.manrope.bold,
+    color: '#FFFFFF',
   },
   trackerSection: {
     paddingHorizontal: 24,
@@ -552,6 +684,11 @@ const styles = (C) => StyleSheet.create({
   },
   courierAvatarEmoji: {
     fontSize: 30,
+  },
+  courierAvatarImg: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
   },
   courierTextBlock: {
     gap: 2,

@@ -8,6 +8,7 @@ import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import { sendOtp, verifyOtp, updateProfile, OTP_LENGTH } from '../api/auth';
+import { uploadAvatar } from '../api/uploads';
 
 export default function OTPScreen({ navigation, route }) {
   const C = useColors();
@@ -65,15 +66,30 @@ export default function OTPScreen({ navigation, route }) {
     if (verifying) return;
     setVerifying(true);
     try {
-      await verifyOtp(phone, code, { name, email, pin, mode });
+      await verifyOtp(phone, code, { name, pin, mode });
+
       // Email et photo ne sont pas gérés par verify-otp : on les pousse sur
-      // le profil juste après.
-      const extras = {
-        ...(email ? { email } : {}),
-        ...(avatarUrl ? { avatarUrl } : {}),
-      };
-      if (Object.keys(extras).length) {
-        try { await updateProfile(extras); } catch {}
+      // le profil juste après, une fois la session ouverte.
+      //
+      // La photo doit d'abord être hébergée : le serveur n'accepte que ses
+      // propres adresses et rejetait l'image encodée envoyée telle quelle.
+      // Les deux champs partent séparément pour qu'un échec sur la photo
+      // n'emporte pas l'adresse e-mail avec lui.
+      if (email) {
+        try {
+          await updateProfile({ email });
+        } catch {
+          // Le compte est créé, c'est l'essentiel : l'e-mail reste
+          // modifiable depuis le profil.
+        }
+      }
+      if (avatarUrl) {
+        try {
+          const hostedUrl = await uploadAvatar(avatarUrl);
+          await updateProfile({ avatarUrl: hostedUrl });
+        } catch {
+          // Idem : la photo pourra être reprise depuis le profil.
+        }
       }
       Animated.spring(successScale, { toValue: 1, friction: 5, useNativeDriver: true }).start(() => {
         setTimeout(() => navigation.replace('Main'), 800);

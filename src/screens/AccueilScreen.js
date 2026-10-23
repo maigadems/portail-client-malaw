@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Pressable, Image } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Pressable, Image, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -8,7 +8,9 @@ import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import TopBar from '../components/TopBar';
 import ClosedOverlay from '../components/ClosedOverlay';
+import { Alert } from '../components/AppAlert';
 import { listRestaurantsNearby, toRestaurantCard, neighborhoodOf } from '../api/restaurants';
+import { favoriteIds, toggleFavorite, hasSession } from '../api/favorites';
 import { reverseGeocode } from '../api/geo';
 import { askLocationPermission } from '../utils/askLocation';
 import { POSTICHES } from '../constants/postiches';
@@ -25,14 +27,17 @@ const HERO_IMAGES = [
 // traduit de h.heroBlocks, qui change selon la langue.
 const HERO_CATEGORIES = ['Plats', 'Fast-food', 'Boissons'];
 
-// Secours si l'API est injoignable ou la base pas encore alimentée —
-// mêmes données que le seed backend (prisma/seed.ts).
-const FALLBACK_RESTAURANTS = [
-  { id: 'seed-chez-fatou',       name: 'Chez Fatou',       cuisine: 'Cuisine sénégalaise', time: '25 min', image: require('../../assets/images/restau1.avif'), tag: 'Populaire', deliveryFee: 0 },
-  { id: 'seed-almadies-seafood', name: 'Almadies Seafood', cuisine: 'Fruits de mer',       time: '30 min', image: require('../../assets/images/restau2.jpg'),  tag: 'Top',       deliveryFee: 1500 },
-  { id: 'seed-ngor-sushi',       name: 'Ngor Sushi',       cuisine: 'Japonais fusion',     time: '35 min', image: require('../../assets/images/restau3.avif'), tag: 'Nouveau',   deliveryFee: 2000 },
-  { id: 'seed-le-fromager',      name: 'Le Fromager',      cuisine: 'Libanais',            time: '20 min', image: require('../../assets/images/restau4.avif'), tag: null,        deliveryFee: 1000 },
-];
+// Seuils réels derrière les libellés de filtres, par position dans
+// h.deliveryOptions / h.timeOptions. On indexe plutôt qu'on ne lit le texte :
+// les libellés sont traduits, leur analyse casserait en anglais.
+const DELIVERY_FEE_MAX = [0, 500, 1000];
+const DELIVERY_TIME_MAX = [20, 30, 45];
+
+/** Durée de préparation en minutes, telle que déclarée par le restaurateur. */
+function prepMinutes(resto) {
+  const min = resto.raw?.prepTimeMin;
+  return typeof min === 'number' ? min : null;
+}
 
 export default function AccueilScreen({ navigation, onSearchPress }) {
   const insets = useSafeAreaInsets();
@@ -43,12 +48,19 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
   // postiche ne laisse plus voir que les restaurants qui l'ont choisi ;
   // cliquer à nouveau dessus retire le filtre.
   const [activePostiche, setActivePostiche] = useState(null);
-  const [restaurants, setRestaurants] = useState(FALLBACK_RESTAURANTS);
+  // Aucune liste de repli : tant que le serveur n'a pas répondu, l'écran
+  // annonce son chargement, et en cas d'échec il le dit. Afficher un
+  // catalogue inventé mènerait le client vers des restaurants inexistants.
+  const [restaurants, setRestaurants] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  // Favoris du client, pour colorer les cœurs des cartes.
+  const [favIds, setFavIds] = useState(new Set());
+  const [favPending, setFavPending] = useState([]);
   // Quartier de chaque restaurant, résolu par géocodage inverse de ses
   // coordonnées — affiché sur la carte à la place d'une distance au client.
   const [neighborhoods, setNeighborhoods] = useState({});
   const [showFilter, setShowFilter] = useState(false);
-  const [activeTri, setActiveTri] = useState(h.sortOptions[0]);
 
   // Quartier réel de l'utilisateur, affiché dans la barre du haut.
   const [locationLabel, setLocationLabel] = useState(null);
@@ -69,20 +81,20 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
         'Malaw affiche les restaurants les plus proches de vous et votre quartier de livraison.',
       );
     }
+    setLoading(true);
+    setError(null);
     try {
       const { items, position } = await listRestaurantsNearby();
-      if (items.length) {
-        const cards = items.map(toRestaurantCard);
-        setRestaurants(cards);
-        // Géocodage inverse par restaurant, en parallèle — un échec isolé
-        // (établissement sans coordonnées, requête en erreur) laisse
-        // simplement son quartier absent plutôt que de bloquer les autres.
-        cards.forEach((c) => {
-          neighborhoodOf(c).then((label) => {
-            if (label) setNeighborhoods((prev) => ({ ...prev, [c.id]: label }));
-          });
+      const cards = items.map(toRestaurantCard);
+      setRestaurants(cards);
+      // Géocodage inverse par restaurant, en parallèle — un échec isolé
+      // (établissement sans coordonnées, requête en erreur) laisse
+      // simplement son quartier absent plutôt que de bloquer les autres.
+      cards.forEach((c) => {
+        neighborhoodOf(c).then((label) => {
+          if (label) setNeighborhoods((prev) => ({ ...prev, [c.id]: label }));
         });
-      }
+      });
       setLocationDenied(!position);
 
       if (!position) {
@@ -106,23 +118,83 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
         console.warn('[accueil] géocodage inverse en échec :', e?.status ?? '', e?.message ?? e);
       }
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('[accueil] chargement impossible :', e?.message ?? e);
+      // Message du serveur affiché tel quel : « Impossible de joindre le
+      // serveur… » est plus actionnable qu'un écran muet.
+      setError(e?.message ?? 'Chargement impossible.');
+    } finally {
+      setLoading(false);
     }
   }, []);
 
+  // Cœurs des cartes : chargés seulement si une session existe — sinon le
+  // 401 déclencherait à tort l'invite de reconnexion.
+  const loadFavorites = useCallback(async () => {
+    try {
+      if (!(await hasSession())) { setFavIds(new Set()); return; }
+      setFavIds(await favoriteIds());
+    } catch {
+      // Les favoris ne conditionnent pas l'affichage du catalogue : en cas
+      // d'échec, les cœurs restent simplement vides.
+    }
+  }, []);
+
+  const basculerFavori = async (resto) => {
+    if (favPending.includes(resto.id)) return;
+    if (!(await hasSession())) {
+      Alert.alert(
+        'Favoris',
+        'Connectez-vous pour enregistrer vos restaurants préférés.',
+        [{ text: 'Plus tard', style: 'cancel' }, { text: 'Se connecter', onPress: () => navigation.navigate('Connexion') }],
+      );
+      return;
+    }
+    const etait = favIds.has(resto.id);
+    setFavPending((p) => [...p, resto.id]);
+    // Mise à jour optimiste : le cœur réagit à l'instant, et revient à son
+    // état précédent si le serveur refuse.
+    setFavIds((prev) => {
+      const next = new Set(prev);
+      if (etait) next.delete(resto.id); else next.add(resto.id);
+      return next;
+    });
+    try {
+      await toggleFavorite(resto.id, etait);
+    } catch (e) {
+      setFavIds((prev) => {
+        const next = new Set(prev);
+        if (etait) next.add(resto.id); else next.delete(resto.id);
+        return next;
+      });
+      Alert.alert('Favoris', e?.message ?? 'Action impossible.', [{ text: 'OK' }]);
+    } finally {
+      setFavPending((p) => p.filter((id) => id !== resto.id));
+    }
+  };
+
   // Rechargé à chaque affichage : la permission a pu être accordée entre-temps
   // (depuis les réglages du téléphone ou l'écran d'adresse).
-  useFocusEffect(useCallback(() => { load(false); }, [load]));
-  const [activeLivraison, setActiveLivraison] = useState(null);
-  const [activeTemps, setActiveTemps] = useState(null);
+  useFocusEffect(useCallback(() => { load(false); loadFavorites(); }, [load, loadFavorites]));
 
-  const activeFiltersCount = [activeLivraison, activeTemps].filter(Boolean).length;
+  // Index de l'option choisie (null = filtre inactif).
+  const [maxLivraison, setMaxLivraison] = useState(null);
+  const [maxTemps, setMaxTemps] = useState(null);
+
+  const activeFiltersCount = [maxLivraison, maxTemps].filter((v) => v != null).length;
   const S = styles(C);
 
-  const visibleRestaurants = activePostiche
-    ? restaurants.filter((r) => r.postiches?.includes(activePostiche))
-    : restaurants;
+  // Filtres réellement appliqués à la liste reçue. Ni les frais ni la durée
+  // de préparation ne sont des paramètres de GET /restaurants : le tri se
+  // fait donc ici, sur les données du serveur.
+  const visibleRestaurants = restaurants
+    .filter((r) => !activePostiche || r.postiches?.includes(activePostiche))
+    .filter((r) => maxLivraison == null || (r.deliveryFee ?? 0) <= DELIVERY_FEE_MAX[maxLivraison])
+    .filter((r) => {
+      if (maxTemps == null) return true;
+      const min = prepMinutes(r);
+      // Restaurant sans durée déclarée : on ne le fait pas passer pour
+      // rapide, on l'écarte du filtre « moins de X min ».
+      return min != null && min <= DELIVERY_TIME_MAX[maxTemps];
+    });
 
   return (
     <View style={S.container}>
@@ -176,23 +248,68 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
               <Text style={S.sectionTitle}>{h.partnersTitle}</Text>
               <Text style={S.sectionSubtitle}>{h.partnersSubtitle}</Text>
             </View>
-            <TouchableOpacity style={S.filterBtn} onPress={() => setShowFilter(true)}>
-              <Ionicons name="options-outline" size={20} color={C.darkGreen} />
-              {activeFiltersCount > 0 && (
-                <View style={S.filterBadge}><Text style={S.filterBadgeText}>{activeFiltersCount}</Text></View>
-              )}
-            </TouchableOpacity>
+            <View style={S.headerActions}>
+              <TouchableOpacity style={S.filterBtn} onPress={() => navigation.navigate('Favoris')}>
+                <Ionicons name="heart-outline" size={20} color={C.darkGreen} />
+              </TouchableOpacity>
+              <TouchableOpacity style={S.filterBtn} onPress={() => setShowFilter(true)}>
+                <Ionicons name="options-outline" size={20} color={C.darkGreen} />
+                {activeFiltersCount > 0 && (
+                  <View style={S.filterBadge}><Text style={S.filterBadgeText}>{activeFiltersCount}</Text></View>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
 
-          {activePostiche && visibleRestaurants.length === 0 && (
-            <Text style={S.emptyText}>Aucun restaurant avec le postiche « {activePostiche} » pour l'instant.</Text>
+          {loading && restaurants.length === 0 && (
+            <View style={S.stateBox}>
+              <ActivityIndicator color={C.darkGreen} />
+              <Text style={S.stateText}>Chargement des restaurants…</Text>
+            </View>
+          )}
+
+          {!loading && error && (
+            <View style={S.stateBox}>
+              <Ionicons name="cloud-offline-outline" size={36} color={C.placeholder} />
+              <Text style={S.stateText}>{error}</Text>
+              <TouchableOpacity style={S.retryBtn} onPress={() => load(false)}>
+                <Text style={S.retryBtnText}>Réessayer</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {!loading && !error && restaurants.length === 0 && (
+            <View style={S.stateBox}>
+              <Ionicons name="restaurant-outline" size={36} color={C.placeholder} />
+              <Text style={S.stateText}>Aucun restaurant partenaire disponible pour le moment.</Text>
+            </View>
+          )}
+
+          {!error && restaurants.length > 0 && visibleRestaurants.length === 0 && (
+            <Text style={S.emptyText}>Aucun restaurant ne correspond à vos filtres.</Text>
           )}
 
           {visibleRestaurants.map((resto) => (
             <TouchableOpacity key={resto.id} style={S.restaurantCard} onPress={() => navigation.navigate('DetailRestaurant', { restaurant: resto })}>
               <View style={S.restaurantImageContainer}>
-                <Image source={resto.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                {/* Visuel neutre quand l'établissement n'a pas encore de
+                    photo — plutôt qu'une image empruntée à un autre. */}
+                {resto.image
+                  ? <Image source={resto.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                  : <View style={S.imagePlaceholder}><Ionicons name="restaurant-outline" size={40} color={C.placeholder} /></View>}
                 {resto.tag && <View style={S.restaurantTagBadge}><Text style={S.restaurantTagText}>{resto.tag}</Text></View>}
+                <TouchableOpacity
+                  style={S.cardHeartBtn}
+                  onPress={() => basculerFavori(resto)}
+                  disabled={favPending.includes(resto.id)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons
+                    name={favIds.has(resto.id) ? 'heart' : 'heart-outline'}
+                    size={18}
+                    color={favIds.has(resto.id) ? '#EF4444' : C.charcoal}
+                  />
+                </TouchableOpacity>
                 {/* Posé en dernier : recouvre aussi le badge promo/tag, qui
                     n'a plus lieu d'attirer l'œil quand on ne peut pas
                     commander. */}
@@ -226,21 +343,22 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
           <View style={S.modalHandle} />
           <View style={S.modalHeader}>
             <Text style={S.modalTitle}>{h.filterTitle}</Text>
-            <TouchableOpacity onPress={() => { setActiveLivraison(null); setActiveTemps(null); }}>
+            <TouchableOpacity onPress={() => { setMaxLivraison(null); setMaxTemps(null); }}>
               <Text style={S.modalReset}>{h.reset}</Text>
             </TouchableOpacity>
           </View>
+          {/* Le tri (« Trier par ») a été retiré : aucun de ses critères
+              n'était appliqué, et le serveur classe déjà par proximité. */}
           {[
-            { label: h.sortBy, items: h.sortOptions, active: activeTri, setActive: setActiveTri, single: true },
-            { label: h.deliveryFee, items: h.deliveryOptions, active: activeLivraison, setActive: setActiveLivraison },
-            { label: h.deliveryTime, items: h.timeOptions, active: activeTemps, setActive: setActiveTemps },
-          ].map(({ label, items, active, setActive, single }) => (
+            { label: h.deliveryFee, items: h.deliveryOptions, active: maxLivraison, setActive: setMaxLivraison },
+            { label: h.deliveryTime, items: h.timeOptions, active: maxTemps, setActive: setMaxTemps },
+          ].map(({ label, items, active, setActive }) => (
             <View key={label}>
               <Text style={S.filterGroupLabel}>{label}</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={S.chipsRow}>
-                {items.map(v => (
-                  <TouchableOpacity key={v} style={[S.chip, active === v && S.chipActive]} onPress={() => setActive(single ? v : (active === v ? null : v))}>
-                    <Text style={[S.chipText, active === v && S.chipTextActive]}>{v}</Text>
+                {items.map((v, i) => (
+                  <TouchableOpacity key={v} style={[S.chip, active === i && S.chipActive]} onPress={() => setActive(active === i ? null : i)}>
+                    <Text style={[S.chipText, active === i && S.chipTextActive]}>{v}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
@@ -279,6 +397,13 @@ const styles = (C) => StyleSheet.create({
   sectionTitle: { fontSize: 24, fontFamily: Fonts.epilogue.bold, color: C.darkGreen, lineHeight: 32 },
   sectionSubtitle: { fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.darkGray, marginTop: 4 },
   emptyText: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: C.placeholder, paddingVertical: 8 },
+  stateBox: { alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 36 },
+  stateText: { fontSize: 14, fontFamily: Fonts.manrope.semiBold, color: C.placeholder, textAlign: 'center', lineHeight: 21 },
+  retryBtn: { height: 46, paddingHorizontal: 24, borderRadius: 100, backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center' },
+  retryBtnText: { color: '#FFFFFF', fontSize: 14, fontFamily: Fonts.manrope.bold },
+  headerActions: { flexDirection: 'row', gap: 8 },
+  imagePlaceholder: { ...StyleSheet.absoluteFillObject, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center' },
+  cardHeartBtn: { position: 'absolute', top: 12, right: 12, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.9)', justifyContent: 'center', alignItems: 'center' },
   filterBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: C.offWhite, justifyContent: 'center', alignItems: 'center', position: 'relative' },
   filterBadge: { position: 'absolute', top: -2, right: -2, width: 16, height: 16, borderRadius: 8, backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center' },
   filterBadgeText: { color: '#FFFFFF', fontSize: 9, fontFamily: Fonts.manrope.bold },

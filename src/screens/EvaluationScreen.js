@@ -1,61 +1,130 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
+import { useCart } from '../context/CartContext';
+import { getOrder } from '../api/orders';
+import { imageSource } from '../api/restaurants';
+import { submitReview, describeVehicle, vehicleIcon } from '../api/reviews';
+import { Alert } from '../components/AppAlert';
 
-const QUICK_TAGS = {
-  positive: ['Délicieux !', 'Livraison rapide', 'Bien emballé', 'Portions généreuses', 'Chaud à l\'arrivée', 'Conforme à la photo'],
-  negative: ['Trop long', 'Emballage abîmé', 'Manque de goût', 'Portion réduite', 'Tiède à l\'arrivée'],
-};
+const RESTAURANT_LABELS = ['', 'Décevant', 'Passable', 'Bon', 'Très bon', 'Excellent !'];
+const COURIER_LABELS = ['', 'Problématique', 'Peut mieux faire', 'Correct', 'Sympa', 'Excellent coursier !'];
 
-const StarRow = ({ value, onChange, size = 40 }) => (
+const StarRow = ({ value, onChange, size = 40, disabled }) => (
   <View style={{ flexDirection: 'row', gap: 8 }}>
-    {[1, 2, 3, 4, 5].map(n => (
-      <TouchableOpacity key={n} onPress={() => onChange(n)}>
+    {[1, 2, 3, 4, 5].map((n) => (
+      <TouchableOpacity key={n} onPress={() => onChange(n)} disabled={disabled} accessibilityLabel={`${n} étoiles`}>
         <Text style={{ fontSize: size, opacity: n <= value ? 1 : 0.25 }}>⭐</Text>
       </TouchableOpacity>
     ))}
   </View>
 );
 
-export default function EvaluationScreen({ navigation }) {
+/**
+ * Évaluation d'une commande livrée : note du restaurant (obligatoire) et
+ * note du livreur (si un livreur a fait la course). Un seul envoi vers
+ * POST /orders/:id/review — c'est ce qui alimente l'écran « Évaluations »
+ * de l'app livreur.
+ */
+export default function EvaluationScreen({ navigation, route }) {
   const C = useColors();
   const S = styles(C);
   const insets = useSafeAreaInsets();
-  const [foodRating, setFoodRating] = useState(0);
-  const [deliveryRating, setDeliveryRating] = useState(0);
-  const [courierRating, setCourierRating] = useState(0);
-  const [selectedTags, setSelectedTags] = useState([]);
-  const [comment, setComment] = useState('');
-  const [submitted, setSubmitted] = useState(false);
-  const [tip, setTip] = useState(null);
+  const { lastOrder } = useCart();
+  // La commande vient toujours de l'appelant (Suivi) ; `lastOrder` ne sert
+  // que de repli si l'écran est atteint autrement.
+  const orderId = route?.params?.orderId ?? lastOrder?.id ?? null;
 
-  const toggleTag = (tag) => {
-    setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
+  const [order, setOrder] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+
+  const [restaurantRating, setRestaurantRating] = useState(0);
+  const [restaurantComment, setRestaurantComment] = useState('');
+  const [courierRating, setCourierRating] = useState(0);
+  const [courierComment, setCourierComment] = useState('');
+  const [sending, setSending] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+
+  const load = async () => {
+    if (!orderId) {
+      setLoadError('Aucune commande à évaluer.');
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const fresh = await getOrder(orderId);
+      setOrder(fresh);
+    } catch (e) {
+      setLoadError(e?.message ?? 'Impossible de charger la commande.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const canSubmit = foodRating > 0 && deliveryRating > 0 && courierRating > 0;
+  useEffect(() => { load(); }, [orderId]);
 
-  const handleSubmit = () => {
-    setSubmitted(true);
-    setTimeout(() => navigation.replace('Main'), 2000);
+  const courier = order?.delivery?.courier ?? null;
+  const vehicle = describeVehicle(courier);
+  const vIcon = vehicleIcon(courier);
+  const isDelivered = order?.status === 'DELIVERED';
+  // Le serveur exige la note du restaurant ; celle du livreur est facultative
+  // mais, si un livreur existe, on ne laisse pas envoyer sans elle : c'est la
+  // raison d'être de cet écran.
+  const canSubmit = isDelivered && restaurantRating > 0 && (!courier || courierRating > 0) && !sending;
+
+  const goHome = () => navigation.replace('Main', { initialTab: 'Commandes' });
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSending(true);
+    try {
+      await submitReview(order.id, {
+        restaurantRating,
+        restaurantComment: restaurantComment.trim() || undefined,
+        courierRating: courier ? courierRating : undefined,
+        courierComment: courier && courierComment.trim() ? courierComment.trim() : undefined,
+      });
+      setSubmitted(true);
+    } catch (e) {
+      if (e?.status === 409) {
+        // Déjà évaluée : ce n'est pas une erreur pour le client, on le dit
+        // simplement et on le ramène à ses commandes.
+        Alert.alert('Déjà évaluée', 'Vous avez déjà donné votre avis sur cette commande. Merci !', [
+          { text: 'OK', onPress: goHome },
+        ]);
+      } else {
+        Alert.alert('Envoi impossible', e?.message ?? 'Une erreur est survenue.');
+      }
+    } finally {
+      setSending(false);
+    }
   };
 
   if (submitted) {
     return (
-      <View style={[S.container, { paddingTop: insets.top, justifyContent: 'center', alignItems: 'center', gap: 20 }]}>
+      <View style={[S.container, { paddingTop: insets.top, justifyContent: 'center', alignItems: 'center', gap: 20, paddingHorizontal: 24 }]}>
         <View style={S.submittedCircle}><Text style={{ fontSize: 56 }}>🙏</Text></View>
         <Text style={S.submittedTitle}>Merci pour votre avis !</Text>
-        <Text style={S.submittedSub}>Votre évaluation aide à améliorer l'expérience de tous les clients Malaw.</Text>
-        {tip && (
-          <View style={S.tipConfirm}>
-            <Text style={S.tipConfirmText}>✅ Pourboire de {tip} FCFA envoyé à votre coursier</Text>
-          </View>
-        )}
+        <Text style={S.submittedSub}>
+          {courier
+            ? `Votre note a été transmise à ${courier.name ?? 'votre coursier'} et au restaurant.`
+            : 'Votre note a été transmise au restaurant.'}
+        </Text>
+        <TouchableOpacity style={S.primaryBtn} onPress={goHome}>
+          <Text style={S.primaryBtnText}>Retour aux commandes</Text>
+        </TouchableOpacity>
       </View>
     );
   }
+
+  const restaurantImage = imageSource(order?.restaurant?.imageUrl);
+  const deliveredAt = order?.deliveredAt ? new Date(order.deliveredAt) : null;
+  const shortId = order?.id ? `#${String(order.id).slice(-8).toUpperCase()}` : '';
 
   return (
     <View style={[S.container, { paddingTop: insets.top }]}>
@@ -64,130 +133,131 @@ export default function EvaluationScreen({ navigation }) {
           <Text style={S.backIcon}>←</Text>
         </TouchableOpacity>
         <Text style={S.headerTitle}>Évaluer la commande</Text>
-        <TouchableOpacity onPress={() => navigation.replace('Main')}>
+        <TouchableOpacity onPress={goHome}>
           <Text style={S.skipText}>Passer</Text>
         </TouchableOpacity>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 120, gap: 20 }}>
-
-        {/* Order recap mini */}
-        <View style={S.orderRecap}>
-          <View style={S.orderRecapEmoji}><Text style={{ fontSize: 30 }}>🦞</Text></View>
-          <View style={S.orderRecapInfo}>
-            <Text style={S.orderRecapName}>Almadies Seafood</Text>
-            <Text style={S.orderRecapMeta}>Commande #MAL-2024-3847 · Livré il y a 10 min</Text>
-          </View>
+      {loading ? (
+        <View style={S.centered}>
+          <ActivityIndicator color={C.darkGreen} />
+          <Text style={S.centeredText}>Chargement de la commande…</Text>
         </View>
-
-        {/* Food rating */}
-        <View style={S.ratingCard}>
-          <Text style={S.ratingCardTitle}>🍽️ La nourriture</Text>
-          <StarRow value={foodRating} onChange={setFoodRating} />
-          {foodRating > 0 && (
-            <Text style={S.ratingLabel}>
-              {['', 'Décevant', 'Passable', 'Bon', 'Très bon', 'Excellent !'][foodRating]}
-            </Text>
-          )}
+      ) : loadError ? (
+        <View style={S.centered}>
+          <Text style={S.centeredText}>{loadError}</Text>
+          {orderId ? (
+            <TouchableOpacity style={S.retryBtn} onPress={load}>
+              <Text style={S.retryBtnText}>Réessayer</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
+      ) : (
+        <>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 140, gap: 20 }}>
 
-        {/* Delivery rating */}
-        <View style={S.ratingCard}>
-          <Text style={S.ratingCardTitle}>📦 La livraison</Text>
-          <StarRow value={deliveryRating} onChange={setDeliveryRating} />
-          {deliveryRating > 0 && (
-            <Text style={S.ratingLabel}>
-              {['', 'Très en retard', 'En retard', 'Dans les temps', 'Rapide', 'Ultra rapide !'][deliveryRating]}
-            </Text>
-          )}
-        </View>
-
-        {/* Courier rating */}
-        <View style={S.ratingCard}>
-          <View style={S.ratingCardHeader}>
-            <View style={S.courierInfo}>
-              <View style={S.courierAvatar}><Text style={{ fontSize: 24 }}>🏍️</Text></View>
-              <View>
-                <Text style={S.ratingCardTitle}>Moussa — votre coursier</Text>
-                <Text style={S.ratingCardSub}>25 livraisons · ⭐ 4.9 global</Text>
+            {/* Rappel de la commande — données réelles uniquement */}
+            <View style={S.orderRecap}>
+              <View style={S.orderRecapEmoji}>
+                {restaurantImage
+                  ? <Image source={restaurantImage} style={S.orderRecapImage} />
+                  : <Text style={{ fontSize: 30 }}>🍽️</Text>}
+              </View>
+              <View style={S.orderRecapInfo}>
+                <Text style={S.orderRecapName}>{order?.restaurant?.name ?? 'Restaurant'}</Text>
+                <Text style={S.orderRecapMeta}>
+                  {[
+                    shortId ? `Commande ${shortId}` : null,
+                    deliveredAt ? `Livrée le ${deliveredAt.toLocaleDateString('fr-FR')} à ${deliveredAt.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}` : null,
+                  ].filter(Boolean).join(' · ')}
+                </Text>
               </View>
             </View>
-          </View>
-          <StarRow value={courierRating} onChange={setCourierRating} size={36} />
-          {courierRating > 0 && (
-            <Text style={S.ratingLabel}>
-              {['', 'Problématique', 'Peut mieux faire', 'Correct', 'Sympa', 'Excellent coursier !'][courierRating]}
-            </Text>
-          )}
 
-          {/* Tip for courier */}
-          <View style={S.tipSection}>
-            <Text style={S.tipTitle}>💝 Laisser un pourboire</Text>
-            <Text style={S.tipSub}>100% va directement à votre coursier</Text>
-            <View style={S.tipOptions}>
-              {[500, 1000, 2000, null].map((amount, i) => (
-                <TouchableOpacity key={i} style={[S.tipChip, tip === amount && S.tipChipActive]} onPress={() => setTip(tip === amount ? null : amount)}>
-                  <Text style={[S.tipChipText, tip === amount && S.tipChipTextActive]}>
-                    {amount ? `${amount.toLocaleString()} FCFA` : 'Autre'}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+            {!isDelivered && (
+              <View style={S.notice}>
+                <Text style={S.noticeText}>Cette commande n'est pas encore livrée : vous pourrez l'évaluer une fois reçue.</Text>
+              </View>
+            )}
+
+            {/* Restaurant */}
+            <View style={S.ratingCard}>
+              <Text style={S.ratingCardTitle}>🍽️ Le restaurant et les plats</Text>
+              <StarRow value={restaurantRating} onChange={setRestaurantRating} disabled={!isDelivered} />
+              {restaurantRating > 0 && (
+                <Text style={S.ratingLabel}>{RESTAURANT_LABELS[restaurantRating]}</Text>
+              )}
+              <TextInput
+                style={S.commentInput}
+                placeholder="Un mot sur les plats, l'emballage… (optionnel)"
+                placeholderTextColor={C.placeholder}
+                value={restaurantComment}
+                onChangeText={setRestaurantComment}
+                multiline
+                maxLength={500}
+                textAlignVertical="top"
+                editable={isDelivered}
+              />
             </View>
+
+            {/* Livreur — uniquement si une course a réellement été faite par
+                quelqu'un. Sans livreur, la section est masquée : le serveur
+                ignorerait la note de toute façon. */}
+            {courier && (
+              <View style={S.ratingCard}>
+                <View style={S.courierInfo}>
+                  <View style={S.courierAvatar}>
+                    {courier.avatarUrl
+                      ? <Image source={{ uri: courier.avatarUrl }} style={S.courierAvatarImg} />
+                      : <Text style={{ fontSize: 24 }}>{vIcon ?? '🧑🏾‍🦱'}</Text>}
+                  </View>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={S.ratingCardTitle}>{courier.name ?? 'Votre coursier'}</Text>
+                    <Text style={S.ratingCardSub}>
+                      {courier.rating != null
+                        ? `⭐ ${courier.rating} (${courier.ratingCount ?? 0} avis)`
+                        : 'Nouveau livreur — soyez le premier à le noter'}
+                    </Text>
+                    {vehicle ? <Text style={S.ratingCardSub}>{vIcon ? `${vIcon} ` : ''}{vehicle}</Text> : null}
+                  </View>
+                </View>
+                <StarRow value={courierRating} onChange={setCourierRating} size={36} disabled={!isDelivered} />
+                {courierRating > 0 && (
+                  <Text style={S.ratingLabel}>{COURIER_LABELS[courierRating]}</Text>
+                )}
+                <TextInput
+                  style={S.commentInput}
+                  placeholder="Ponctualité, contact, état de la commande… (optionnel)"
+                  placeholderTextColor={C.placeholder}
+                  value={courierComment}
+                  onChangeText={setCourierComment}
+                  multiline
+                  maxLength={500}
+                  textAlignVertical="top"
+                  editable={isDelivered}
+                />
+              </View>
+            )}
+          </ScrollView>
+
+          <View style={[S.submitBar, { paddingBottom: insets.bottom + 12 }]}>
+            {!canSubmit && !sending && isDelivered && (
+              <Text style={S.submitHint}>
+                {courier ? 'Notez le restaurant et le livreur pour envoyer' : 'Notez le restaurant pour envoyer'}
+              </Text>
+            )}
+            <TouchableOpacity
+              style={[S.submitBtn, !canSubmit && S.submitBtnDisabled]}
+              onPress={handleSubmit}
+              disabled={!canSubmit}
+            >
+              {sending
+                ? <ActivityIndicator color={C.white} />
+                : <Text style={S.submitBtnText}>Envoyer mon avis</Text>}
+            </TouchableOpacity>
           </View>
-        </View>
-
-        {/* Quick tags */}
-        <View style={S.tagsSection}>
-          <Text style={S.tagsSectionTitle}>Ce qui vous a plu</Text>
-          <View style={S.tagsGrid}>
-            {QUICK_TAGS.positive.map(tag => (
-              <TouchableOpacity key={tag} style={[S.quickTag, selectedTags.includes(tag) && S.quickTagActive]} onPress={() => toggleTag(tag)}>
-                <Text style={[S.quickTagText, selectedTags.includes(tag) && S.quickTagTextActive]}>{tag}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <Text style={[S.tagsSectionTitle, { marginTop: 12 }]}>Points à améliorer</Text>
-          <View style={S.tagsGrid}>
-            {QUICK_TAGS.negative.map(tag => (
-              <TouchableOpacity key={tag} style={[S.quickTag, S.quickTagNeg, selectedTags.includes(tag) && S.quickTagNegActive]} onPress={() => toggleTag(tag)}>
-                <Text style={[S.quickTagText, selectedTags.includes(tag) && { color: '#B91C1C' }]}>{tag}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Comment */}
-        <View style={S.commentSection}>
-          <Text style={S.commentTitle}>Commentaire (optionnel)</Text>
-          <TextInput
-            style={S.commentInput}
-            placeholder="Partagez votre expérience en détail..."
-            placeholderTextColor={C.placeholder}
-            value={comment}
-            onChangeText={setComment}
-            multiline
-            numberOfLines={4}
-            textAlignVertical="top"
-          />
-        </View>
-
-        {/* Photo note */}
-        <View style={S.photoNote}>
-          <Text style={S.photoNoteIcon}>📸</Text>
-          <Text style={S.photoNoteText}>Ajouter une photo de votre commande renforce votre avis et aide la communauté.</Text>
-          <TouchableOpacity style={S.addPhotoBtn}><Text style={S.addPhotoBtnText}>+ Photo</Text></TouchableOpacity>
-        </View>
-      </ScrollView>
-
-      {/* Submit */}
-      <View style={[S.submitBar, { paddingBottom: insets.bottom + 12 }]}>
-        {!canSubmit && (
-          <Text style={S.submitHint}>⚠️ Notez les 3 critères pour soumettre</Text>
-        )}
-        <TouchableOpacity style={[S.submitBtn, !canSubmit && S.submitBtnDisabled]} onPress={handleSubmit} disabled={!canSubmit}>
-          <Text style={S.submitBtnText}>Soumettre mon avis</Text>
-        </TouchableOpacity>
-      </View>
+        </>
+      )}
     </View>
   );
 }
@@ -198,48 +268,31 @@ const styles = (C) => StyleSheet.create({
   backIcon: { fontSize: 22, color: C.darkGreen, padding: 4 },
   headerTitle: { fontSize: 18, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
   skipText: { fontSize: 14, fontFamily: Fonts.manrope.semiBold, color: C.placeholder },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 14, paddingHorizontal: 32 },
+  centeredText: { fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.darkGray, textAlign: 'center', lineHeight: 20 },
+  retryBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 100, backgroundColor: C.darkGreen },
+  retryBtnText: { color: C.white, fontSize: 14, fontFamily: Fonts.manrope.bold },
   submittedCircle: { width: 120, height: 120, borderRadius: 60, backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center', shadowColor: C.darkGreen, shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },
   submittedTitle: { fontSize: 24, fontFamily: Fonts.epilogue.bold, color: C.darkGreen, textAlign: 'center' },
   submittedSub: { fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.darkGray, textAlign: 'center', lineHeight: 22, paddingHorizontal: 20 },
-  tipConfirm: { backgroundColor: '#F0FDF4', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 10 },
-  tipConfirmText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: '#166534' },
+  primaryBtn: { height: 52, paddingHorizontal: 28, backgroundColor: C.darkGreen, borderRadius: 100, justifyContent: 'center', alignItems: 'center', marginTop: 8 },
+  primaryBtnText: { color: C.white, fontSize: 15, fontFamily: Fonts.manrope.bold },
   orderRecap: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: C.white, borderRadius: 16, padding: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
-  orderRecapEmoji: { width: 52, height: 52, borderRadius: 26, backgroundColor: C.offWhite, justifyContent: 'center', alignItems: 'center' },
+  orderRecapEmoji: { width: 52, height: 52, borderRadius: 26, backgroundColor: C.offWhite, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  orderRecapImage: { width: 52, height: 52 },
   orderRecapInfo: { flex: 1, gap: 4 },
   orderRecapName: { fontSize: 15, fontFamily: Fonts.manrope.bold, color: C.charcoal },
   orderRecapMeta: { fontSize: 12, fontFamily: Fonts.manrope.regular, color: C.placeholder },
+  notice: { backgroundColor: 'rgba(121,89,0,0.1)', borderRadius: 12, padding: 14 },
+  noticeText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.gold, lineHeight: 18 },
   ratingCard: { backgroundColor: C.white, borderRadius: 20, padding: 20, gap: 14, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
-  ratingCardHeader: { gap: 4 },
   ratingCardTitle: { fontSize: 15, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
   ratingCardSub: { fontSize: 11, fontFamily: Fonts.manrope.regular, color: C.placeholder },
   ratingLabel: { fontSize: 14, fontFamily: Fonts.manrope.semiBold, color: C.gold },
   courierInfo: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  courierAvatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center' },
-  tipSection: { gap: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: C.offWhite },
-  tipTitle: { fontSize: 13, fontFamily: Fonts.manrope.bold, color: C.charcoal },
-  tipSub: { fontSize: 11, fontFamily: Fonts.manrope.regular, color: C.placeholder },
-  tipOptions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
-  tipChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: C.offWhite, borderWidth: 1.5, borderColor: C.mediumGray },
-  tipChipActive: { backgroundColor: C.darkGreen, borderColor: C.darkGreen },
-  tipChipText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
-  tipChipTextActive: { color: C.white },
-  tagsSection: { gap: 10 },
-  tagsSectionTitle: { fontSize: 14, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
-  tagsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  quickTag: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: C.white, borderWidth: 1.5, borderColor: C.mediumGray },
-  quickTagActive: { backgroundColor: C.darkGreen + '12', borderColor: C.darkGreen },
-  quickTagNeg: { borderColor: '#FECACA', backgroundColor: '#FFF5F5' },
-  quickTagNegActive: { backgroundColor: '#FEE2E2', borderColor: '#F87171' },
-  quickTagText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
-  quickTagTextActive: { color: C.darkGreen },
-  commentSection: { gap: 8 },
-  commentTitle: { fontSize: 14, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
-  commentInput: { backgroundColor: C.white, borderRadius: 16, padding: 16, minHeight: 100, fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.charcoal, borderWidth: 1.5, borderColor: C.mediumGray },
-  photoNote: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.offWhite, borderRadius: 14, padding: 14 },
-  photoNoteIcon: { fontSize: 20 },
-  photoNoteText: { flex: 1, fontSize: 12, fontFamily: Fonts.manrope.regular, color: C.darkGray, lineHeight: 18 },
-  addPhotoBtn: { backgroundColor: C.darkGreen, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
-  addPhotoBtnText: { color: C.white, fontSize: 12, fontFamily: Fonts.manrope.bold },
+  courierAvatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  courierAvatarImg: { width: 48, height: 48 },
+  commentInput: { backgroundColor: C.offWhite, borderRadius: 14, padding: 14, minHeight: 80, fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.charcoal, borderWidth: 1.5, borderColor: C.mediumGray },
   submitBar: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.white, paddingHorizontal: 20, paddingTop: 12, gap: 8, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 10 },
   submitHint: { fontSize: 12, fontFamily: Fonts.manrope.regular, color: C.placeholder, textAlign: 'center' },
   submitBtn: { height: 58, backgroundColor: C.darkGreen, borderRadius: 100, justifyContent: 'center', alignItems: 'center' },

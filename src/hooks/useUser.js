@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { getStoredUser, saveSession } from '../api/client';
-import { me, OTP_SIMULATION } from '../api/auth';
+import { me } from '../api/auth';
 
 /**
  * Utilisateur de la session courante ({ id, phone, name, email, role,
@@ -22,15 +22,13 @@ export function useUser() {
     useCallback(() => {
       let active = true;
       getStoredUser().then((u) => { if (active && u) setUser(u); });
-      if (!OTP_SIMULATION) {
-        me()
-          .then(async (u) => {
-            if (!u) return;
-            await saveSession({ user: u });
-            if (active) setUser(u);
-          })
-          .catch(() => {}); // hors-ligne ou session expirée : on garde la copie locale
-      }
+      me()
+        .then(async (u) => {
+          if (!u) return;
+          await saveSession({ user: u });
+          if (active) setUser(u);
+        })
+        .catch(() => {}); // hors-ligne ou session expirée : on garde la copie locale
       return () => { active = false; };
     }, [])
   );

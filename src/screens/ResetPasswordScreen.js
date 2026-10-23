@@ -5,13 +5,18 @@ import { Ionicons } from '@expo/vector-icons';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
-import { sendOtp, PIN_LENGTH } from '../api/auth';
+import { changePin, PIN_LENGTH } from '../api/auth';
 import { useUser, formatPhone } from '../hooks/useUser';
+import { Alert } from '../components/AppAlert';
 
 /**
- * « Changer le code PIN » — utilisateur connecté (accessible depuis
- * Paramètres). Le numéro vient de la session ; le nouveau PIN est confirmé
- * par OTP SMS (verify-otp avec `pin` = reset sur téléphone vérifié).
+ * « Changer le code PIN » — utilisateur déjà connecté (accessible depuis
+ * Paramètres).
+ *
+ * Le code actuel fait foi, pas un SMS : c'est plus sûr (un téléphone laissé
+ * déverrouillé ne suffit plus) et cela fonctionne là où le SMS n'arrive pas.
+ * Le cas du PIN réellement oublié, hors session, reste traité par
+ * MotDePasseOublieScreen avec son OTP.
  */
 export default function ResetPasswordScreen({ navigation }) {
   const C = useColors();
@@ -20,21 +25,31 @@ export default function ResetPasswordScreen({ navigation }) {
   const a = t.auth;
   const insets = useSafeAreaInsets();
   const { user } = useUser();
+  const [current, setCurrent] = useState('');
   const [pin, setPin] = useState('');
   const [confirm, setConfirm] = useState('');
   const [showPin, setShowPin] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const handleSend = async () => {
+  const digitsOnly = new RegExp(`^\\d{${PIN_LENGTH}}$`);
+
+  const handleSubmit = async () => {
+    // `loading` garde aussi contre le double-appui : deux envois simultanés
+    // feraient échouer le second, le PIN ayant déjà changé.
+    if (loading) return;
     if (!user?.phone) { setError(a.sessionRequired); return; }
-    if (!new RegExp(`^\\d{${PIN_LENGTH}}$`).test(pin)) { setError(a.choosePin.replace('{n}', PIN_LENGTH)); return; }
+    if (!digitsOnly.test(current)) { setError(a.currentPinRequired.replace('{n}', PIN_LENGTH)); return; }
+    if (!digitsOnly.test(pin)) { setError(a.choosePin.replace('{n}', PIN_LENGTH)); return; }
+    if (pin === current) { setError(a.samePin); return; }
     if (pin !== confirm) { setError(a.pinMismatch); return; }
     setError('');
     setLoading(true);
     try {
-      const res = await sendOtp(user.phone);
-      navigation.navigate('OTP', { phone: user.phone, pin, mode: 'reset', devOtp: res?.devOtp });
+      await changePin({ currentPin: current, newPin: pin });
+      Alert.alert(a.pinChangedTitle, a.pinChangedBody, [
+        { text: a.ok, onPress: () => navigation.goBack() },
+      ]);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -56,9 +71,26 @@ export default function ResetPasswordScreen({ navigation }) {
           </View>
           <Text style={S.title}>{a.pinChangeTitle}</Text>
           <Text style={S.subtitle}>
-            {a.pinChangeSubtitle}{'\n'}
+            {a.pinChangeIntro}{'\n'}
             <Text style={S.phoneHighlight}>{formatPhone(user?.phone)}</Text>
           </Text>
+
+          {/* Code actuel — c'est lui qui autorise le changement */}
+          <View style={S.fieldGroup}>
+            <Text style={S.fieldLabel}>{a.currentPin}</Text>
+            <View style={S.inputContainer}>
+              <TextInput
+                style={[S.input, { flex: 1 }]}
+                placeholder={'•'.repeat(PIN_LENGTH)}
+                placeholderTextColor={C.placeholder}
+                keyboardType="number-pad"
+                maxLength={PIN_LENGTH}
+                secureTextEntry={!showPin}
+                value={current}
+                onChangeText={v => { setCurrent(v.replace(/\D/g, '')); setError(''); }}
+              />
+            </View>
+          </View>
 
           {/* Nouveau PIN */}
           <View style={S.fieldGroup}>
@@ -101,12 +133,12 @@ export default function ResetPasswordScreen({ navigation }) {
 
           <TouchableOpacity
             style={[S.primaryBtn, loading && S.primaryBtnDisabled]}
-            onPress={handleSend}
+            onPress={handleSubmit}
             disabled={loading}
           >
             {loading
               ? <ActivityIndicator color={C.white} />
-              : <Text style={S.primaryBtnText}>{a.sendCode}</Text>}
+              : <Text style={S.primaryBtnText}>{a.pinChangeSubmit}</Text>}
           </TouchableOpacity>
         </ScrollView>
       </View>

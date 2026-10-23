@@ -34,9 +34,18 @@ import ConfirmationCommandeScreen from '../screens/ConfirmationCommandeScreen';
 import SuiviScreen from '../screens/SuiviScreen';
 import EvaluationScreen from '../screens/EvaluationScreen';
 import LitigeScreen from '../screens/LitigeScreen';
+import MesReclamationsScreen from '../screens/MesReclamationsScreen';
+
+// Paiement — page du prestataire (Wave / Orange Money) ouverte dans l'app
+import PaiementScreen from '../screens/PaiementScreen';
 
 // History
 import HistoriqueScreen from '../screens/HistoriqueScreen';
+import DetailCommandeScreen from '../screens/DetailCommandeScreen';
+
+// Notifications & favoris
+import NotificationsScreen from '../screens/NotificationsScreen';
+import FavorisScreen from '../screens/FavorisScreen';
 
 // Settings & misc
 import ParametresScreen from '../screens/ParametresScreen';
@@ -111,12 +120,33 @@ export default function AppNavigator() {
         {/* Tracking */}
         <Stack.Screen name="Suivi" component={SuiviScreen} />
 
-        {/* Post-delivery */}
+        {/* Post-delivery — Evaluation attend { orderId } (ouvert depuis Suivi
+            une fois la commande DELIVERED) ; l'écran recharge la commande
+            lui-même pour afficher le vrai restaurant et le vrai livreur. */}
         <Stack.Screen name="Evaluation" component={EvaluationScreen} />
         <Stack.Screen name="Litige" component={LitigeScreen} />
+        {/* Suivi des réclamations : sans cet écran, le client ne savait
+            jamais si son litige avait été traité. */}
+        <Stack.Screen name="MesReclamations" component={MesReclamationsScreen} />
+
+        {/* Paiement — attend { orderId, paymentUrl }. Ouvre la page du
+            prestataire dans l'app, puis vérifie le statut auprès du serveur :
+            c'est le webhook du prestataire qui fait foi, pas la page. */}
+        <Stack.Screen
+          name="Paiement"
+          component={PaiementScreen}
+          options={{ gestureEnabled: false }}
+        />
 
         {/* History */}
         <Stack.Screen name="Historique" component={HistoriqueScreen} />
+        {/* Détail d'une commande passée — attend { orderId }. C'est lui qui
+            redonne accès à l'évaluation et au litige après livraison. */}
+        <Stack.Screen name="DetailCommande" component={DetailCommandeScreen} />
+
+        {/* Notifications & favoris */}
+        <Stack.Screen name="Notifications" component={NotificationsScreen} />
+        <Stack.Screen name="Favoris" component={FavorisScreen} />
 
         {/* Settings */}
         <Stack.Screen name="Parametres" component={ParametresScreen} />

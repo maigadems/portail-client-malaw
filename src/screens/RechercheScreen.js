@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Image, Keyboard } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Image, Keyboard, ActivityIndicator } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { Fonts } from '../constants/theme';
@@ -7,6 +7,7 @@ import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import TopBar from '../components/TopBar';
 import ClosedOverlay from '../components/ClosedOverlay';
+import { apiPublic } from '../api/client';
 import {
   listRestaurantsNearby,
   getRestaurant,
@@ -18,99 +19,54 @@ import {
 const RECENT_SEARCHES_KEY = 'malaw_recent_searches';
 const MAX_RECENT_SEARCHES = 3;
 
-// `searchTerm` = mot-clé rempli dans la barre de recherche au tap sur la
-// carte — pas forcément identique au libellé affiché (ex. "Un bon Thieb" →
-// "Thieb").
-const POPULAR_CUISINES = [
-  { id: '1', name: 'Un bon Thieb', image: require('../../assets/images/riz-rouge-au-poulet.webp'), searchTerm: 'Thieb' },
-  { id: '2', name: 'Hamburger',    image: require('../../assets/images/burger.jpg'),               searchTerm: 'Burger' },
-  { id: '3', name: 'Tacos',        image: require('../../assets/images/tacos.jpeg'),                searchTerm: 'Tacos' },
-  { id: '4', name: 'Kebab',        image: require('../../assets/images/kebab.webp'),                searchTerm: 'Kebab' },
-];
+// Délai d'anti-rebond avant d'interroger le serveur : assez court pour que
+// la liste suive la frappe, assez long pour ne pas lancer une requête par
+// caractère.
+const SEARCH_DEBOUNCE_MS = 400;
 
-// Ordre d'affichage des catégories — même liste que DetailRestaurantScreen.
+// Nombre de fiches dont on charge le menu pour alimenter la section
+// « Plats ». Le serveur n'expose pas de recherche de plats : on compose la
+// liste à partir des menus des restaurants les plus proches, et ce plafond
+// borne le nombre de requêtes.
+const MENU_FETCH_LIMIT = 12;
+
+// Ordre d'affichage des catégories de plats — mêmes valeurs que celles
+// saisissables par le restaurateur. Seules celles réellement présentes dans
+// les menus chargés sont proposées.
 const CATEGORIES = ['Plats', 'Fast-food', 'Grillades', 'Entrées', 'Desserts', 'Boissons'];
-
-// Secours si l'API est injoignable — mêmes données que le seed backend.
-const FALLBACK_RESTAURANTS = [
-  { id: 'seed-chez-fatou',       name: 'Chez Fatou',       cuisine: 'Cuisine sénégalaise', time: '25 min', image: require('../../assets/images/restau1.avif'), promo: '-10%', tag: 'Populaire', deliveryFee: 0 },
-  { id: 'seed-almadies-seafood', name: 'Almadies Seafood', cuisine: 'Fruits de mer',       time: '30 min', image: require('../../assets/images/restau2.jpg'),  promo: null,    tag: 'Top',       deliveryFee: 1500 },
-  { id: 'seed-ngor-sushi',       name: 'Ngor Sushi',       cuisine: 'Japonais fusion',     time: '35 min', image: require('../../assets/images/restau3.avif'), promo: null,    tag: 'Nouveau',   deliveryFee: 2000 },
-  { id: 'seed-le-fromager',      name: 'Le Fromager',      cuisine: 'Libanais',            time: '20 min', image: require('../../assets/images/restau4.avif'), promo: '-5%',   tag: null,        deliveryFee: 1000 },
-  { id: 'seed-dakar-grill',      name: 'Dakar Grill',      cuisine: 'Grillades & BBQ',     time: '28 min', image: require('../../assets/images/restau5.avif'), promo: null,    tag: null,        deliveryFee: 0 },
-];
-
-const FALLBACK_PLATS = [
-  { id: 'seed-chez-fatou-thieboudiene-royal', cat: 'Plats',     name: 'Thiéboudiène Royal', desc: 'Riz au poisson rouge, légumes frais, sauce tomate maison', price: 4500, time: '30 min', restaurant: 'Chez Fatou',  image: require('../../assets/images/riz-rouge-au-poulet.webp'), resto: FALLBACK_RESTAURANTS[0] },
-  { id: 'seed-dakar-grill-burger-dakarois',   cat: 'Fast-food', name: 'Burger Dakarois',    desc: 'Pain brioché, steak haché grillé, cheddar, sauce secrète', price: 3200, time: '20 min', restaurant: 'Dakar Grill', image: require('../../assets/images/burger.jpg'),               resto: FALLBACK_RESTAURANTS[4] },
-  { id: 'seed-le-fromager-tacos-almadies',    cat: 'Fast-food', name: 'Tacos Almadies',     desc: 'Tortilla grillée, viande hachée, sauce fromagère maison',  price: 2800, time: '15 min', restaurant: 'Le Fromager', image: require('../../assets/images/tacos.jpeg'),               resto: FALLBACK_RESTAURANTS[3] },
-  { id: 'seed-le-fromager-kebab-maison',      cat: 'Fast-food', name: 'Kebab Maison',       desc: 'Pain libanais, viande marinée, crudités, sauce blanche',   price: 2500, time: '15 min', restaurant: 'Le Fromager', image: require('../../assets/images/kebab.webp'),               resto: FALLBACK_RESTAURANTS[3] },
-];
 
 export default function RechercheScreen({ navigation, initialQuery = '', initialCategory = null }) {
   const C = useColors();
   const { t } = useLang();
   const r = t.search;
   const [query, setQuery] = useState(initialQuery);
-  const [restaurants, setRestaurants] = useState(FALLBACK_RESTAURANTS);
-  const [plats, setPlats] = useState(FALLBACK_PLATS);
+  // Terme réellement envoyé au serveur, en retard sur la frappe.
+  const [debouncedQuery, setDebouncedQuery] = useState(initialQuery.trim());
+
+  // Aucune donnée de démonstration : les listes restent vides tant que le
+  // serveur n'a pas répondu, et l'écran explique ce qui se passe.
+  const [restaurants, setRestaurants] = useState([]);
+  const [loadingRestaurants, setLoadingRestaurants] = useState(true);
+  const [errorRestaurants, setErrorRestaurants] = useState(null);
+
+  const [plats, setPlats] = useState([]);
+  const [loadingPlats, setLoadingPlats] = useState(true);
+  const [errorPlats, setErrorPlats] = useState(null);
+
+  // Cuisines réellement présentes en base (GET /categories) — remplace la
+  // liste figée de vignettes qui promettait des plats inexistants.
+  const [cuisines, setCuisines] = useState([]);
+  const [activeCuisine, setActiveCuisine] = useState(null);
+  const [openOnly, setOpenOnly] = useState(false);
+  // Incrémenté par « Réessayer » : relance les deux chargements sans
+  // toucher aux filtres en cours.
+  const [reloadKey, setReloadKey] = useState(0);
+
   // Quartier de chaque restaurant, résolu par géocodage inverse — même
   // logique que l'écran d'accueil.
   const [neighborhoods, setNeighborhoods] = useState({});
   const [recentSearches, setRecentSearches] = useState([]);
 
-  useEffect(() => {
-    AsyncStorage.getItem(RECENT_SEARCHES_KEY).then((raw) => {
-      if (raw) setRecentSearches(JSON.parse(raw));
-    }).catch(() => {});
-  }, []);
-
-  const saveRecentSearch = (term) => {
-    const clean = term.trim();
-    if (!clean) return;
-    setRecentSearches((prev) => {
-      const next = [clean, ...prev.filter((s) => s.toLowerCase() !== clean.toLowerCase())].slice(0, MAX_RECENT_SEARCHES);
-      AsyncStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(next)).catch(() => {});
-      return next;
-    });
-  };
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        // Même tri par proximité que l'accueil : les résultats les plus
-        // proches d'abord, avec leur distance.
-        const { items } = await listRestaurantsNearby();
-        if (!items.length) return;
-        if (active) {
-          const cards = items.map(toRestaurantCard);
-          setRestaurants(cards);
-          cards.forEach((c) => {
-            neighborhoodOf(c).then((label) => {
-              if (label) setNeighborhoods((prev) => ({ ...prev, [c.id]: label }));
-            });
-          });
-        }
-        // Les plats mis en avant = items de menu qui ont une photo.
-        const details = await Promise.all(
-          items.map((x) => getRestaurant(x.id).catch(() => null)),
-        );
-        const dishes = [];
-        for (const d of details) {
-          if (!d?.menu) continue;
-          for (const m of d.menu) {
-            if (!m.imageUrl) continue;
-            dishes.push({ ...toMenuItemCard(m), restaurant: d.name, resto: toRestaurantCard(d) });
-          }
-        }
-        if (active && dishes.length) setPlats(dishes);
-      } catch {
-        // API injoignable : on garde les données locales
-      }
-    })();
-    return () => { active = false; };
-  }, []);
   // Identifiants stables ; libellés traduits à l'affichage
   const [activeSection, setActiveSection] = useState('Tout');
   const sections = [
@@ -131,6 +87,108 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
   // remonter depuis le haut de l'écran Recherche.
   const pendingScrollToDiscover = useRef(!!initialCategory);
 
+  useEffect(() => {
+    AsyncStorage.getItem(RECENT_SEARCHES_KEY).then((raw) => {
+      if (raw) setRecentSearches(JSON.parse(raw));
+    }).catch(() => {});
+  }, []);
+
+  const saveRecentSearch = (term) => {
+    const clean = term.trim();
+    if (!clean) return;
+    setRecentSearches((prev) => {
+      const next = [clean, ...prev.filter((s) => s.toLowerCase() !== clean.toLowerCase())].slice(0, MAX_RECENT_SEARCHES);
+      AsyncStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  };
+
+  // Anti-rebond de la frappe.
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(query.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [query]);
+
+  // Cuisines proposées en filtre, lues en base.
+  useEffect(() => {
+    let active = true;
+    apiPublic('/categories')
+      .then((d) => { if (active) setCuisines(d?.items ?? []); })
+      .catch(() => {
+        // Les cuisines ne sont qu'un raccourci : leur absence ne doit pas
+        // empêcher de chercher.
+      });
+    return () => { active = false; };
+  }, []);
+
+  /**
+   * Recherche serveur : `q` porte sur le nom ET la description des
+   * restaurants, `cuisine` et `openOnly` sont appliqués en base. Le tri par
+   * proximité est conservé.
+   */
+  useEffect(() => {
+    let active = true;
+    setLoadingRestaurants(true);
+    setErrorRestaurants(null);
+    listRestaurantsNearby({
+      ...(debouncedQuery ? { q: debouncedQuery } : {}),
+      ...(activeCuisine ? { cuisine: activeCuisine } : {}),
+      ...(openOnly ? { openOnly: true } : {}),
+    })
+      .then(({ items }) => {
+        if (!active) return;
+        const cards = items.map(toRestaurantCard);
+        setRestaurants(cards);
+        cards.forEach((c) => {
+          neighborhoodOf(c).then((label) => {
+            if (label) setNeighborhoods((prev) => ({ ...prev, [c.id]: label }));
+          });
+        });
+      })
+      .catch((e) => { if (active) setErrorRestaurants(e?.message ?? 'Recherche impossible.'); })
+      .finally(() => { if (active) setLoadingRestaurants(false); });
+    return () => { active = false; };
+  }, [debouncedQuery, activeCuisine, openOnly, reloadKey]);
+
+  /**
+   * Corpus de plats : menus des restaurants proches.
+   *
+   * Rechargé sur les seuls filtres serveur, pas à chaque frappe — le mot-clé
+   * est appliqué localement ci-dessous, car `q` ne cherche que dans les
+   * restaurants. Un plat sans photo est bien inclus : l'écran affiche un
+   * visuel de remplacement au lieu de le faire disparaître.
+   */
+  useEffect(() => {
+    let active = true;
+    setLoadingPlats(true);
+    setErrorPlats(null);
+    (async () => {
+      try {
+        const { items } = await listRestaurantsNearby({
+          ...(activeCuisine ? { cuisine: activeCuisine } : {}),
+          ...(openOnly ? { openOnly: true } : {}),
+          limit: MENU_FETCH_LIMIT,
+        });
+        const details = await Promise.all(items.map((x) => getRestaurant(x.id).catch(() => null)));
+        if (!active) return;
+        const dishes = [];
+        for (const d of details) {
+          if (!d?.menu) continue;
+          const resto = toRestaurantCard(d);
+          for (const m of d.menu) {
+            dishes.push({ ...toMenuItemCard(m), restaurant: d.name, resto });
+          }
+        }
+        setPlats(dishes);
+      } catch (e) {
+        if (active) setErrorPlats(e?.message ?? 'Chargement des plats impossible.');
+      } finally {
+        if (active) setLoadingPlats(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [activeCuisine, openOnly, reloadKey]);
+
   useEffect(() => { setQuery(initialQuery); }, [initialQuery]);
   useEffect(() => {
     setActiveCategory(initialCategory);
@@ -142,8 +200,7 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
   }, [initialCategory]);
 
   // Catégories réellement présentes dans les plats chargés, dans l'ordre de
-  // CATEGORIES — même logique que les onglets de DetailRestaurantScreen :
-  // une catégorie sans plat ne s'affiche pas.
+  // CATEGORIES : une catégorie sans plat ne s'affiche pas.
   const availableCategories = useMemo(() => {
     const used = new Set(plats.map((p) => p.cat).filter(Boolean));
     const ordered = CATEGORIES.filter((c) => used.has(c));
@@ -151,12 +208,9 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
     return [...ordered, ...extra];
   }, [plats]);
 
-  // Filtrage local sur nom/cuisine/restaurant : la barre de recherche ne
-  // faisait rien auparavant, `query` n'étant jamais lu.
-  const q = query.trim().toLowerCase();
-  const filteredRestaurants = q
-    ? restaurants.filter((r2) => r2.name.toLowerCase().includes(q) || r2.cuisine?.toLowerCase().includes(q))
-    : restaurants;
+  // Filtrage local des plats : complément du `q` serveur, qui ne couvre que
+  // les restaurants.
+  const q = debouncedQuery.toLowerCase();
   const filteredPlats = plats
     .filter((p) => !activeCategory || p.cat === activeCategory)
     .filter((p) => !q || (
@@ -169,6 +223,8 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
     setQuery(term);
     saveRecentSearch(term);
   };
+
+  const relancer = () => setReloadKey((k) => k + 1);
 
   return (
     <View style={S.container}>
@@ -188,7 +244,24 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
               returnKeyType="search"
               onSubmitEditing={() => { saveRecentSearch(query); Keyboard.dismiss(); }}
             />
+            {/* Le chargement se lit dans la barre elle-même : la recherche
+                part sans qu'on valide, il faut voir qu'elle travaille. */}
+            {loadingRestaurants && query.length > 0 && <ActivityIndicator size="small" color={C.darkGreen} />}
             {query.length > 0 && <TouchableOpacity onPress={() => setQuery('')}><Ionicons name="close-circle" size={18} color={C.placeholder} /></TouchableOpacity>}
+          </View>
+
+          <View style={S.filtersRow}>
+            <TouchableOpacity
+              style={[S.filterChip, openOnly && S.filterChipActive]}
+              onPress={() => setOpenOnly((v) => !v)}
+            >
+              <Ionicons name="time-outline" size={13} color={openOnly ? '#FFFFFF' : C.charcoal} />
+              <Text style={[S.filterChipText, openOnly && S.filterChipTextActive]}>Ouverts</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={S.filterChip} onPress={() => navigation.navigate('Favoris')}>
+              <Ionicons name="heart-outline" size={13} color={C.charcoal} />
+              <Text style={S.filterChipText}>Favoris</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -202,7 +275,7 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
                 <Text style={S.sectionTitle}>{r.recent}</Text>
                 <View style={S.tagsRow}>
                   {recentSearches.map((s) => (
-                    <TouchableOpacity key={s} style={S.recentTag} onPress={() => setQuery(s)}>
+                    <TouchableOpacity key={s} style={S.recentTag} onPress={() => searchFor(s)}>
                       <Ionicons name="time-outline" size={13} color={C.placeholder} />
                       <Text style={S.recentTagText}>{s}</Text>
                     </TouchableOpacity>
@@ -211,39 +284,34 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
               </View>
             )}
 
-            <View style={S.section}>
-              <View style={S.sectionHeaderRow}>
-                <View>
-                  <Text style={S.sectionTitle}>{r.popularCuisines}</Text>
-                  <Text style={S.sectionSubtitle}>{r.inDakar}</Text>
+            {/* Cuisines lues en base : chaque choix est un filtre `cuisine`
+                envoyé au serveur, donc un résultat garanti non vide. */}
+            {cuisines.length > 0 && (
+              <View style={S.section}>
+                <View style={S.sectionHeaderRow}>
+                  <View>
+                    <Text style={S.sectionTitle}>{r.popularCuisines}</Text>
+                    <Text style={S.sectionSubtitle}>{r.inDakar}</Text>
+                  </View>
+                  {activeCuisine && (
+                    <TouchableOpacity onPress={() => setActiveCuisine(null)}>
+                      <Text style={S.seeAllText}>{r.all}</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
-                <TouchableOpacity onPress={() => { setActiveCategory(null); setActiveSection('Plats'); }}>
-                  <Text style={S.seeAllText}>{r.seeAll}</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={S.bentoGrid}>
-                <TouchableOpacity style={S.bentoFull} onPress={() => searchFor(POPULAR_CUISINES[0].searchTerm)}>
-                  <View style={StyleSheet.absoluteFill}><Image source={POPULAR_CUISINES[0].image} style={S.fillImage} resizeMode="cover" /></View>
-                  <View style={S.bentoOverlay} />
-                  <Text style={S.bentoLabel}>{POPULAR_CUISINES[0].name}</Text>
-                </TouchableOpacity>
-                <View style={S.bentoRow}>
-                  {[1, 2].map(i => (
-                    <TouchableOpacity key={i} style={S.bentoHalf} onPress={() => searchFor(POPULAR_CUISINES[i].searchTerm)}>
-                      <View style={StyleSheet.absoluteFill}><Image source={POPULAR_CUISINES[i].image} style={S.fillImage} resizeMode="cover" /></View>
-                      <View style={S.bentoOverlay} />
-                      <Text style={S.bentoLabel}>{POPULAR_CUISINES[i].name}</Text>
+                <View style={S.tagsRow}>
+                  {cuisines.map((cui) => (
+                    <TouchableOpacity
+                      key={cui}
+                      style={[S.cuisineChip, activeCuisine === cui && S.cuisineChipActive]}
+                      onPress={() => setActiveCuisine((prev) => (prev === cui ? null : cui))}
+                    >
+                      <Text style={[S.cuisineChipText, activeCuisine === cui && S.cuisineChipTextActive]}>{cui}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
-                <TouchableOpacity style={[S.bentoFull, { height: 90 }]} onPress={() => searchFor(POPULAR_CUISINES[3].searchTerm)}>
-                  <View style={StyleSheet.absoluteFill}><Image source={POPULAR_CUISINES[3].image} style={S.fillImage} resizeMode="cover" /></View>
-                  <View style={S.bentoOverlay} />
-                  <Text style={S.bentoLabel}>{POPULAR_CUISINES[3].name}</Text>
-                </TouchableOpacity>
               </View>
-            </View>
+            )}
           </>
         )}
 
@@ -269,8 +337,7 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
           {(activeSection === 'Tout' || activeSection === 'Plats') && (
             <View style={S.subSection}>
               {activeSection === 'Tout' && <Text style={S.subSectionTitle}>{r.dishes}</Text>}
-              {/* Filtre par catégorie — mêmes catégories que celles
-                  saisissables par le restaurateur, détectées dans les plats
+              {/* Filtre par catégorie — catégories détectées dans les plats
                   réellement chargés. */}
               {availableCategories.length > 0 && (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={S.categoryRow}>
@@ -284,7 +351,26 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
                   ))}
                 </ScrollView>
               )}
-              {filteredPlats.length === 0 && <Text style={S.emptyText}>{r.noResults}</Text>}
+
+              {loadingPlats && plats.length === 0 && (
+                <View style={S.stateBox}>
+                  <ActivityIndicator color={C.darkGreen} />
+                  <Text style={S.stateText}>Chargement des plats…</Text>
+                </View>
+              )}
+              {!loadingPlats && errorPlats && (
+                <View style={S.stateBox}>
+                  <Ionicons name="cloud-offline-outline" size={34} color={C.placeholder} />
+                  <Text style={S.stateText}>{errorPlats}</Text>
+                  <TouchableOpacity style={S.retryBtn} onPress={relancer}>
+                    <Text style={S.retryBtnText}>Réessayer</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {!loadingPlats && !errorPlats && filteredPlats.length === 0 && (
+                <Text style={S.emptyText}>{r.noResults}</Text>
+              )}
+
               {filteredPlats.map((plat) => {
                 // Un plat reste listé même si son restaurant est fermé : on le
                 // signale ici, sinon le client ne le découvrirait qu'en
@@ -293,7 +379,11 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
                 return (
                   <TouchableOpacity key={plat.id} style={S.platCard} onPress={() => { saveRecentSearch(query); navigation.navigate('DetailPlat', { item: plat }); }}>
                     <View style={S.platImageBox}>
-                      <Image source={plat.image} style={S.platImage} resizeMode="cover" />
+                      {/* Plat sans photo : vignette neutre, il reste
+                          trouvable au lieu d'être écarté de la liste. */}
+                      {plat.image
+                        ? <Image source={plat.image} style={S.platImage} resizeMode="cover" />
+                        : <View style={S.platImagePlaceholder}><Text style={S.platEmoji}>{plat.emoji}</Text></View>}
                       {platFerme && <ClosedOverlay compact />}
                     </View>
                     <View style={[S.platInfo, platFerme && S.cardInfoClosed]}>
@@ -319,11 +409,32 @@ export default function RechercheScreen({ navigation, initialQuery = '', initial
           {(activeSection === 'Tout' || activeSection === 'Restaurants') && (
             <View style={S.subSection}>
               {activeSection === 'Tout' && <Text style={S.subSectionTitle}>{r.restaurants}</Text>}
-              {filteredRestaurants.length === 0 && <Text style={S.emptyText}>{r.noResults}</Text>}
-              {filteredRestaurants.map((resto) => (
+
+              {loadingRestaurants && restaurants.length === 0 && (
+                <View style={S.stateBox}>
+                  <ActivityIndicator color={C.darkGreen} />
+                  <Text style={S.stateText}>Recherche en cours…</Text>
+                </View>
+              )}
+              {!loadingRestaurants && errorRestaurants && (
+                <View style={S.stateBox}>
+                  <Ionicons name="cloud-offline-outline" size={34} color={C.placeholder} />
+                  <Text style={S.stateText}>{errorRestaurants}</Text>
+                  <TouchableOpacity style={S.retryBtn} onPress={relancer}>
+                    <Text style={S.retryBtnText}>Réessayer</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {!loadingRestaurants && !errorRestaurants && restaurants.length === 0 && (
+                <Text style={S.emptyText}>{r.noResults}</Text>
+              )}
+
+              {restaurants.map((resto) => (
                 <TouchableOpacity key={resto.id} style={S.restaurantCard} onPress={() => { saveRecentSearch(query); navigation.navigate('DetailRestaurant', { restaurant: resto }); }}>
                   <View style={S.restaurantImageBox}>
-                    <Image source={resto.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                    {resto.image
+                      ? <Image source={resto.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                      : <View style={S.restaurantImagePlaceholder}><Ionicons name="restaurant-outline" size={36} color={C.placeholder} /></View>}
                     {resto.tag && <View style={S.tagBadge}><Text style={S.tagBadgeText}>{resto.tag}</Text></View>}
                     {resto.promo && <View style={[S.tagBadge, S.promoBadge]}><Text style={S.tagBadgeText}>{resto.promo}</Text></View>}
                     {!resto.isOpen && <ClosedOverlay />}
@@ -391,6 +502,22 @@ const styles = (C) => StyleSheet.create({
   categoryChipText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
   categoryChipTextActive: { color: '#FFFFFF' },
   emptyText: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: C.placeholder, paddingVertical: 8 },
+  stateBox: { alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 28 },
+  stateText: { fontSize: 14, fontFamily: Fonts.manrope.semiBold, color: C.placeholder, textAlign: 'center', lineHeight: 21 },
+  retryBtn: { height: 44, paddingHorizontal: 22, borderRadius: 100, backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center' },
+  retryBtnText: { color: '#FFFFFF', fontSize: 14, fontFamily: Fonts.manrope.bold },
+  filtersRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  filterChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: C.offWhite, borderWidth: 1.5, borderColor: C.mediumGray },
+  filterChipActive: { backgroundColor: C.darkGreen, borderColor: C.darkGreen },
+  filterChipText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
+  filterChipTextActive: { color: '#FFFFFF' },
+  cuisineChip: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, backgroundColor: C.offWhite, borderWidth: 1.5, borderColor: C.mediumGray },
+  cuisineChipActive: { backgroundColor: C.darkGreen, borderColor: C.darkGreen },
+  cuisineChipText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
+  cuisineChipTextActive: { color: '#FFFFFF' },
+  platImagePlaceholder: { width: 90, height: 90, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center' },
+  platEmoji: { fontSize: 32 },
+  restaurantImagePlaceholder: { ...StyleSheet.absoluteFillObject, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center' },
   restaurantCard: { backgroundColor: C.white, borderRadius: 16, overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
   restaurantImageBox: { height: 180, overflow: 'hidden' },
   tagBadge: { position: 'absolute', top: 12, left: 12, backgroundColor: C.darkGreen, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },

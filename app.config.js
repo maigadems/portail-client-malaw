@@ -13,9 +13,14 @@ const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? '';
 
 export default {
   expo: {
-    name: 'portail-client',
-    slug: 'portail-client',
+    // `name` est ce qui s'affiche sous l'icône sur le téléphone : ce doit
+    // être le nom du produit, pas celui du dossier de code.
+    name: 'Malaw',
+    slug: 'malaw-client',
     version: '1.0.0',
+    // Numéros de build, exigés par les magasins d'applications. À incrémenter
+    // à chaque publication, indépendamment de `version`.
+    runtimeVersion: { policy: 'appVersion' },
     orientation: 'portrait',
     // Permet d'ouvrir directement une fiche restaurant/plat depuis un lien
     // partagé (malaw://restaurant/:id, malaw://plat/:id) — voir
@@ -27,9 +32,11 @@ export default {
       supportsTablet: true,
       // Apple Plans : aucune clé requise pour react-native-maps sur iOS.
       bundleIdentifier: 'com.malaw.client',
+      buildNumber: '1',
     },
     android: {
       package: 'com.malaw.client',
+      versionCode: 1,
       adaptiveIcon: {
         backgroundColor: '#E6F4FE',
         foregroundImage: './assets/android-icon-foreground.png',
@@ -45,7 +52,21 @@ export default {
     },
     plugins: [
       'expo-font',
-      'expo-splash-screen',
+      [
+        'expo-splash-screen',
+        {
+          // Sans ces réglages, l'app démarre sur un écran blanc avant même
+          // son propre écran d'accueil — et en blanc y compris pour un
+          // utilisateur en thème sombre.
+          image: './assets/splash-icon.png',
+          backgroundColor: '#0B3B2E',
+          imageWidth: 180,
+          resizeMode: 'contain',
+        },
+      ],
+      // Requis depuis le SDK 57 : expo-status-bar embarque désormais un
+      // plugin de config natif.
+      'expo-status-bar',
       [
         'expo-image-picker',
         {

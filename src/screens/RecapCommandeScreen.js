@@ -1,12 +1,13 @@
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useCart } from '../context/CartContext';
-import { createOrder } from '../api/orders';
-import { paymentById } from '../constants/payments';
+import { useActiveOrder } from '../context/OrderContext';
+import { createOrder, getOrder, newIdempotencyKey } from '../api/orders';
+import { paymentById, isOnlinePayment } from '../constants/payments';
 import { Alert } from '../components/AppAlert';
 
 export default function RecapCommandeScreen({ navigation }) {
@@ -14,26 +15,110 @@ export default function RecapCommandeScreen({ navigation }) {
   const S = styles(C);
   const insets = useSafeAreaInsets();
   const cart = useCart();
+  const { trackOrder } = useActiveOrder();
   const { restaurant, items, address, coupon, subtotal, deliveryFee, discount, total } = cart;
   const payment = paymentById(cart.payment?.id);
+  const online = isOnlinePayment(cart.payment?.api ?? payment.api);
   const [loading, setLoading] = useState(false);
 
+  // Empreinte du panier : tant qu'elle ne bouge pas, les tentatives portent
+  // sur la même intention de commande et doivent réutiliser la même clé.
+  const cartSignature = useMemo(
+    () =>
+      JSON.stringify({
+        r: restaurant?.id ?? null,
+        a: address?.id ?? null,
+        p: cart.payment?.api ?? null,
+        c: coupon?.code ?? null,
+        n: cart.notes ?? '',
+        i: items.map((i) => [i.id, i.qty, i.note ?? '']),
+      }),
+    [restaurant?.id, address?.id, cart.payment?.api, coupon?.code, cart.notes, items],
+  );
+
+  // Clé d'idempotence stable. Régénérée uniquement quand le panier change ou
+  // après un succès : au Sénégal la réponse se perd souvent alors que la
+  // requête a abouti, et une clé neuve à chaque appui facturerait une
+  // seconde commande.
+  const idemRef = useRef({ key: newIdempotencyKey(), signature: cartSignature });
+  if (idemRef.current.signature !== cartSignature) {
+    idemRef.current = { key: newIdempotencyKey(), signature: cartSignature };
+  }
+
+  // Garde synchrone : `loading` n'est visible qu'au rendu suivant, deux
+  // appuis rapprochés passeraient tous les deux.
+  const submitting = useRef(false);
+
+  /**
+   * Poursuit une fois la commande connue du serveur. Un moyen en ligne n'est
+   * pas réglé par la seule création : il faut ouvrir la page du prestataire.
+   */
+  const proceed = (order) => {
+    cart.setLastOrder(order);
+    cart.clearCart();
+    void trackOrder(order);
+
+    const needsPayment =
+      isOnlinePayment(order.paymentMethod) &&
+      order.paymentStatus !== 'PAID' &&
+      order.paymentStatus !== 'AUTHORIZED';
+
+    if (needsPayment) {
+      // `paymentUrl` peut manquer (réponse tronquée, reprise après 409) :
+      // l'écran Paiement sait la redemander via GET /orders/:id/payment-url.
+      navigation.replace('Paiement', {
+        orderId: order.id,
+        paymentUrl: order.paymentUrl ?? null,
+      });
+      return;
+    }
+    navigation.replace('Main', { initialTab: 'Commandes' });
+  };
+
   const handlePay = async () => {
+    if (submitting.current) return;
     if (!items.length || !restaurant || !address || !cart.payment) {
       Alert.alert('Commande', 'Votre commande est incomplète (panier, adresse ou paiement manquant).');
       return;
     }
+    submitting.current = true;
     setLoading(true);
     try {
-      // POST /orders (ou simulation locale) : le backend valide le panier,
-      // recalcule les totaux, applique le coupon et journalise l'événement.
-      const order = await createOrder(cart);
-      cart.setLastOrder(order);
-      cart.clearCart();
-      navigation.navigate('AttenteCuisine');
+      // POST /orders : le backend valide le panier, recalcule les totaux,
+      // applique le coupon puis initie le paiement chez le prestataire.
+      const order = await createOrder(cart, idemRef.current.key);
+
+      // Échec à l'initiation : le backend a annulé la commande. Une nouvelle
+      // tentative doit créer une vraie nouvelle commande, donc clé neuve —
+      // sinon le rejeu retomberait indéfiniment sur la commande annulée.
+      if (order?.paymentStatus === 'FAILED') {
+        idemRef.current = { key: newIdempotencyKey(), signature: cartSignature };
+        Alert.alert(
+          'Paiement',
+          "Le paiement n'a pas pu être lancé et la commande a été annulée. Vous pouvez réessayer.",
+        );
+        return;
+      }
+
+      idemRef.current = { key: newIdempotencyKey(), signature: cartSignature };
+      proceed(order);
     } catch (e) {
+      // 409 = rejeu idempotent : la commande existe déjà côté serveur, seule
+      // la réponse s'était perdue. On la récupère au lieu d'afficher une
+      // erreur qui pousserait le client à commander une deuxième fois.
+      const existingId = e?.status === 409 ? e?.body?.resourceId : null;
+      if (existingId) {
+        try {
+          proceed(await getOrder(existingId));
+          return;
+        } catch (e2) {
+          Alert.alert('Commande', e2.message);
+          return;
+        }
+      }
       Alert.alert('Commande', e.message);
     } finally {
+      submitting.current = false;
       setLoading(false);
     }
   };
@@ -119,7 +204,11 @@ export default function RecapCommandeScreen({ navigation }) {
             <View style={S.addrText}>
               <Text style={S.addrType}>{address?.label}</Text>
               <Text style={S.addrAddress}>{address?.line}</Text>
-              <Text style={S.addrEta}>⚡ Livraison estimée dans {restaurant?.time ?? '25–35 min'}</Text>
+              {/* Pas de délai de repli inventé : sans donnée du restaurant,
+                  la ligne disparaît. */}
+              {restaurant?.time ? (
+                <Text style={S.addrEta}>⚡ Livraison estimée dans {restaurant.time}</Text>
+              ) : null}
             </View>
           </View>
         </View>
@@ -186,12 +275,19 @@ export default function RecapCommandeScreen({ navigation }) {
       {/* Pay CTA */}
       <View style={[S.payBar, { paddingBottom: insets.bottom + 12 }]}>
         <View style={S.payBarTop}>
-          <Text style={S.payBarLabel}>Total à payer via {payment.label}</Text>
+          <Text style={S.payBarLabel}>
+            {online ? `Total à payer via ${payment.label}` : 'À régler au livreur à la remise'}
+          </Text>
           <Text style={S.payBarAmount}>{total.toLocaleString()} FCFA</Text>
         </View>
         <TouchableOpacity style={[S.payBtn, loading && S.payBtnLoading]} onPress={handlePay} disabled={loading}>
           <Text style={S.payBtnText}>
-            {loading ? '⏳ Traitement en cours...' : `💳 Payer ${total.toLocaleString()} FCFA`}
+            {/* Libellé honnête : en espèces ce bouton ne prélève rien. */}
+            {loading
+              ? '⏳ Traitement en cours...'
+              : online
+                ? `💳 Payer ${total.toLocaleString()} FCFA`
+                : `Commander · ${total.toLocaleString()} FCFA`}
           </Text>
         </TouchableOpacity>
       </View>

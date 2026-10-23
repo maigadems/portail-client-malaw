@@ -14,11 +14,6 @@ import { platShareLink, goBackOrHome } from '../utils/shareLink';
 
 const { height } = Dimensions.get('window');
 
-const DEFAULT_ITEM = {
-  id: '1', name: 'Thiéboudiène Royal', desc: 'Riz au poisson rouge, légumes frais de saison, sauce tomate maison mijotée pendant 3 heures. Servi avec du citron et des légumes vapeur.',
-  price: 4500, time: '30 min',
-};
-
 export default function DetailPlatScreen({ navigation, route }) {
   const C = useColors();
   const S = styles(C);
@@ -32,7 +27,9 @@ export default function DetailPlatScreen({ navigation, route }) {
   const linkIds = route?.params?.restaurantId && route?.params?.itemId
     ? { restaurantId: route.params.restaurantId, itemId: route.params.itemId }
     : null;
-  const [item, setItem] = useState(route?.params?.item ?? (linkIds ? null : DEFAULT_ITEM));
+  // Aucun plat par défaut : un écran ouvert sans paramètre affiche une
+  // erreur, il n'invente pas un plat qui n'existe pas au catalogue.
+  const [item, setItem] = useState(route?.params?.item ?? null);
   const [restaurant, setRestaurant] = useState(
     route?.params?.restaurant ?? route?.params?.item?.resto ?? null,
   );
@@ -143,9 +140,15 @@ export default function DetailPlatScreen({ navigation, route }) {
           <Ionicons name="arrow-back" size={18} color={C.charcoal} />
         </TouchableOpacity>
         <View style={S.linkStateBody}>
-          <Ionicons name={linkError ? 'alert-circle-outline' : 'hourglass-outline'} size={40} color={C.placeholder} />
+          {/* Sans lien à résoudre, il n'y a rien à attendre : afficher
+              « Chargement » laisserait l'écran tourner indéfiniment. */}
+          <Ionicons
+            name={linkError || !linkIds ? 'alert-circle-outline' : 'hourglass-outline'}
+            size={40}
+            color={C.placeholder}
+          />
           <Text style={S.linkStateText}>
-            {linkError ? "Ce plat n'est plus disponible." : 'Chargement du plat…'}
+            {linkError || !linkIds ? "Ce plat n'est plus disponible." : 'Chargement du plat…'}
           </Text>
         </View>
       </View>

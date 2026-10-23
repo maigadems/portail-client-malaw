@@ -17,6 +17,7 @@ import {
   toRestaurantCard,
   toMenuItemCard,
 } from '../api/restaurants';
+import { isFavorite, toggleFavorite, hasSession } from '../api/favorites';
 import { restaurantShareLink, goBackOrHome } from '../utils/shareLink';
 
 const { width } = Dimensions.get('window');
@@ -27,23 +28,10 @@ const HEADER_HEIGHT = 280;
 // ajoutée à la suite.
 const TAGS = ['Tout', 'Plats', 'Fast-food', 'Grillades', 'Entrées', 'Desserts', 'Boissons'];
 
-// Secours si l'API est injoignable — mêmes données que le seed backend
-// (menu d'Almadies Seafood, le restaurant par défaut de cet écran).
-const FALLBACK_RESTO = {
-  id: 'seed-almadies-seafood',
-  name: 'Almadies Seafood',
-  cuisine: 'Fruits de mer',
-  time: '25–35 min',
-  deliveryFee: 1500,
-  description: "Fraîchement pêché dans l'Atlantique et préparé selon les traditions culinaires sénégalaises. Chaque plat raconte l'histoire de la mer Dakaroise.",
-  image: null,
-};
-
-const FALLBACK_MENU = [
-  { id: '1', cat: 'Grillades', name: 'Crevettes grillées', desc: 'Crevettes fraîches, sauce citron, frites', price: 6500, time: '25 min', popular: true },
-  { id: '2', cat: 'Grillades', name: 'Thiof grillé', desc: 'Poisson frais grillé au charbon, accompagné de légumes', price: 6500, time: '35 min', popular: true },
-  { id: '3', cat: 'Entrées', name: 'Accras de crevettes', desc: 'Beignets croustillants aux crevettes fraîches', price: 2500, time: '15 min', popular: false },
-];
+// Code promo réellement enregistré en base (prisma/seed.ts) : -15 %,
+// plafonné, utilisable une fois par client. Il n'a pas de date de fin — le
+// bandeau n'en annonce donc aucune.
+const PROMO_CODE = 'MALAW15';
 
 export default function DetailRestaurantScreen({ navigation, route }) {
   const C = useColors();
@@ -54,15 +42,19 @@ export default function DetailRestaurantScreen({ navigation, route }) {
   // `restaurant` : ouverture normale (Accueil/Recherche). `id` seul : lien
   // partagé malaw://restaurant/:id — le fetch ci-dessous résout le reste.
   const fromLink = !route?.params?.restaurant && !!route?.params?.id;
-  const resto = route?.params?.restaurant ?? (fromLink ? { id: route.params.id } : FALLBACK_RESTO);
-  // Depuis un lien partagé, on n'a qu'un id : pas de repli sur les données
-  // de démo (Almadies Seafood) le temps du fetch, ça afficherait le mauvais
-  // restaurant. `info` reste vide jusqu'à la réponse de l'API.
-  const [info, setInfo] = useState(fromLink ? resto : { ...FALLBACK_RESTO, ...resto });
-  const [menuItems, setMenuItems] = useState(fromLink ? [] : FALLBACK_MENU);
+  const resto = route?.params?.restaurant ?? (fromLink ? { id: route.params.id } : null);
+  // Aucune fiche de démonstration : `info` part de ce que l'écran appelant a
+  // transmis (déjà des données serveur), et le menu reste vide jusqu'à la
+  // réponse de l'API.
+  const [info, setInfo] = useState(resto ?? {});
+  const [menuItems, setMenuItems] = useState([]);
+  const [menuLoading, setMenuLoading] = useState(true);
+  const [menuError, setMenuError] = useState(null);
   const [activeTag, setActiveTag] = useState('Tout');
   const { restaurant: cartResto, items: cartItems, addItem, updateQty, removeItem } = useCart();
+  // Favori : état réel chargé au montage, basculé de façon optimiste.
   const [liked, setLiked] = useState(false);
+  const [likePending, setLikePending] = useState(false);
   const [hours, setHours] = useState(null);
   // État d'ouverture réel : horaires de l'établissement s'ils existent, sinon
   // son drapeau isOpen. Null tant que la requête n'a pas répondu.
@@ -81,17 +73,28 @@ export default function DetailRestaurantScreen({ navigation, route }) {
 
   const [linkError, setLinkError] = useState(false);
 
+  const [reloadKey, setReloadKey] = useState(0);
+
   useEffect(() => {
     let active = true;
     if (!resto?.id) return;
+    setMenuLoading(true);
+    setMenuError(null);
     getRestaurant(resto.id)
       .then((d) => {
         if (!active) return;
         if (!d) { if (fromLink) setLinkError(true); return; }
         setInfo((prev) => ({ ...prev, ...toRestaurantCard(d) }));
-        if (d.menu?.length) setMenuItems(d.menu.map(toMenuItemCard));
+        setMenuItems((d.menu ?? []).map(toMenuItemCard));
       })
-      .catch(() => { if (active && fromLink) setLinkError(true); }); // depuis Accueil/Recherche : on garde les données locales
+      .catch((e) => {
+        if (!active) return;
+        if (fromLink) setLinkError(true);
+        // Le menu est le cœur de l'écran : sans lui on le dit, plutôt que
+        // d'afficher les plats d'un autre restaurant.
+        setMenuError(e?.message ?? 'Menu indisponible.');
+      })
+      .finally(() => { if (active) setMenuLoading(false); });
 
     // Horaires réels de l'établissement (remplace le "Ferme à 23h00" en dur).
     getRestaurantHours(resto.id)
@@ -99,7 +102,48 @@ export default function DetailRestaurantScreen({ navigation, route }) {
       .catch(() => {}); // sans horaires, le bandeau retombe sur isOpen
 
     return () => { active = false; };
+  }, [resto?.id, reloadKey]);
+
+  // État réel du cœur. Sans session, il reste vide : le tap proposera alors
+  // de se connecter plutôt que d'échouer en 401.
+  useEffect(() => {
+    let active = true;
+    if (!resto?.id) return;
+    (async () => {
+      try {
+        if (!(await hasSession())) return;
+        const fav = await isFavorite(resto.id);
+        if (active) setLiked(fav);
+      } catch {
+        // Le favori n'est qu'un ornement de la fiche : son échec ne doit
+        // rien empêcher.
+      }
+    })();
+    return () => { active = false; };
   }, [resto?.id]);
+
+  const basculerFavori = async () => {
+    if (likePending || !info.id) return;
+    if (!(await hasSession())) {
+      Alert.alert(
+        'Favoris',
+        'Connectez-vous pour enregistrer vos restaurants préférés.',
+        [{ text: 'Plus tard', style: 'cancel' }, { text: 'Se connecter', onPress: () => navigation.navigate('Connexion') }],
+      );
+      return;
+    }
+    const etait = liked;
+    setLikePending(true);
+    setLiked(!etait);
+    try {
+      await toggleFavorite(info.id, etait);
+    } catch (e) {
+      setLiked(etait);
+      Alert.alert('Favoris', e?.message ?? 'Action impossible.', [{ text: 'OK' }]);
+    } finally {
+      setLikePending(false);
+    }
+  };
 
   const headerOpacity = scrollY.interpolate({ inputRange: [HEADER_HEIGHT - 80, HEADER_HEIGHT - 40], outputRange: [0, 1], extrapolate: 'clamp' });
   const heroScale = scrollY.interpolate({ inputRange: [-50, 0], outputRange: [1.1, 1], extrapolate: 'clamp' });
@@ -240,8 +284,10 @@ export default function DetailRestaurantScreen({ navigation, route }) {
             ))}
           </View>
 
-          {/* Description */}
-          <Text style={S.description}>{info.description || FALLBACK_RESTO.description}</Text>
+          {/* Description — masquée si le restaurateur n'en a pas saisi.
+              Elle reprenait auparavant celle d'un autre établissement, ce qui
+              décrivait au client un menu qui n'était pas celui qu'il regardait. */}
+          {info.description ? <Text style={S.description}>{info.description}</Text> : null}
 
           {/* Horaires d'ouverture — grille déclarée par le restaurateur
               depuis sa plateforme. Masquée s'il n'en a pas encore saisi. */}

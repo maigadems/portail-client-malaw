@@ -1,9 +1,28 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Linking } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
+import { Alert } from '../components/AppAlert';
+import { probeNetwork, setNetworkOnline } from '../components/OfflineBanner';
+
+/**
+ * Écran d'erreur réseau.
+ *
+ * Paramètres de route attendus (tous facultatifs) :
+ *   - `type`    : 'network' | 'server' | 'notfound' | 'timeout'
+ *   - `status`  : le vrai code HTTP renvoyé par l'API (ApiError.status)
+ *   - `message` : le message du serveur, s'il est présentable
+ *   - `onRetry` : l'action à relancer ; si elle aboutit, on revient à l'écran
+ *                 d'origine.
+ *
+ * Le code d'erreur affiché vient désormais de `status` : il était écrit en
+ * dur (« ERR_500 ») et mentait donc sur neuf erreurs sur dix, ce qui rendait
+ * les captures d'écran des clients inutilisables pour le support.
+ */
+
+const SUPPORT_EMAIL = 'support@malaw.sn';
 
 const ERROR_TYPES = {
   network: { emoji: '📡', title: 'Pas de connexion', subtitle: 'Vérifiez votre connexion internet et réessayez.', color: '#F59E0B' },
@@ -18,42 +37,102 @@ export default function ErreurReseauScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
   const errorType = route?.params?.type ?? 'network';
   const err = ERROR_TYPES[errorType] || ERROR_TYPES.network;
+  const status = route?.params?.status ?? null;
+  const serverMessage = route?.params?.message ?? null;
+  const onRetry = route?.params?.onRetry ?? null;
+
   const [retrying, setRetrying] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const shakeAnim = useRef(new Animated.Value(0)).current;
+  const [lastCheck, setLastCheck] = useState(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const mounted = useRef(true);
 
   useEffect(() => {
-    Animated.loop(
+    mounted.current = true;
+    const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1.06, duration: 1200, useNativeDriver: true }),
         Animated.timing(pulseAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
       ])
-    ).start();
-  }, []);
+    );
+    loop.start();
+    return () => {
+      mounted.current = false;
+      loop.stop();
+    };
+  }, [pulseAnim]);
 
-  const handleRetry = () => {
+  /**
+   * Réessayer vraiment : on vérifie que l'API répond, puis on relance
+   * l'action qui a échoué. L'ancienne version se contentait d'attendre deux
+   * secondes et de revenir en arrière — l'écran précédent retombait alors
+   * sur la même erreur.
+   */
+  const handleRetry = async () => {
     setRetrying(true);
-    setRetryCount(c => c + 1);
-    setTimeout(() => {
-      setRetrying(false);
-      if (retryCount >= 1) {
-        navigation.goBack();
-      }
-    }, 2000);
+    setRetryCount((c) => c + 1);
+    const reachable = await probeNetwork();
+    setNetworkOnline(reachable);
+    if (!mounted.current) return;
+    setLastCheck(reachable ? 'up' : 'down');
+    setRetrying(false);
+
+    if (!reachable) return;
+
+    try {
+      await onRetry?.();
+      if (!mounted.current) return;
+      if (navigation.canGoBack()) navigation.goBack();
+      else navigation.replace('Main');
+    } catch (e) {
+      if (!mounted.current) return;
+      Alert.alert('Nouvelle tentative échouée', e?.message ?? 'Réessayez dans un instant.');
+    }
+  };
+
+  const handleSupport = () => {
+    const subject = encodeURIComponent(
+      `Problème technique${status ? ` (code ${status})` : ''}`,
+    );
+    const body = encodeURIComponent(
+      `Bonjour,\n\nJ'ai rencontré l'erreur suivante dans l'application :\n` +
+        `${err.title}${status ? ` — code ${status}` : ''}\n` +
+        `${serverMessage ? `Message : ${serverMessage}\n` : ''}\n`,
+    );
+    Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`).catch(() => {
+      // Aucune application de messagerie : l'adresse reste utile, on la donne.
+      Alert.alert('Contacter le support', `Écrivez-nous à ${SUPPORT_EMAIL}`);
+    });
+  };
+
+  /**
+   * « État du service » interroge la sonde de vivacité du backend, plutôt que
+   * d'ouvrir une page de statut qui n'existe pas.
+   */
+  const handleStatus = async () => {
+    const reachable = await probeNetwork();
+    setNetworkOnline(reachable);
+    if (!mounted.current) return;
+    setLastCheck(reachable ? 'up' : 'down');
+    Alert.alert(
+      'État du service',
+      reachable
+        ? 'Nos serveurs répondent normalement. Le problème vient probablement de votre connexion.'
+        : "Nos serveurs sont injoignables depuis votre appareil. Vérifiez votre connexion ; s'ils restent injoignables, l'incident est de notre côté.",
+    );
   };
 
   return (
     <View style={[S.container, { paddingTop: insets.top }]}>
       <View style={S.decorCircle} />
 
-      {/* Back if navigated here */}
-      <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-        <Text style={S.backIcon}>← Retour</Text>
-      </TouchableOpacity>
+      {navigation.canGoBack() ? (
+        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
+          <Text style={S.backIcon}>← Retour</Text>
+        </TouchableOpacity>
+      ) : null}
 
       <View style={S.content}>
-        {/* Animated error icon */}
         <Animated.View style={[S.iconWrapper, { transform: [{ scale: pulseAnim }] }]}>
           <View style={[S.iconBg, { backgroundColor: err.color + '18' }]}>
             {err.icon
@@ -64,48 +143,50 @@ export default function ErreurReseauScreen({ navigation, route }) {
         </Animated.View>
 
         <Text style={S.title}>{err.title}</Text>
-        <Text style={S.subtitle}>{err.subtitle}</Text>
+        <Text style={S.subtitle}>{serverMessage ?? err.subtitle}</Text>
 
-        {/* Error code */}
-        {errorType === 'server' && (
+        {/* Code réel uniquement : sans code transmis, mieux vaut ne rien
+            afficher qu'un numéro inventé. */}
+        {status ? (
           <View style={S.errorCode}>
-            <Text style={S.errorCodeText}>Code erreur : ERR_500</Text>
+            <Text style={S.errorCodeText}>Code erreur : {status}</Text>
           </View>
-        )}
+        ) : null}
 
-        {/* Retry button */}
-        <TouchableOpacity style={[S.retryBtn, retrying && S.retryBtnLoading]} onPress={handleRetry} disabled={retrying}>
+        <TouchableOpacity
+          style={[S.retryBtn, retrying && S.retryBtnLoading]}
+          onPress={handleRetry}
+          disabled={retrying}
+        >
           <Text style={S.retryBtnText}>
-            {retrying ? '⟳ Reconnexion...' : '↺ Réessayer'}
+            {retrying ? '⟳ Vérification…' : '↺ Réessayer'}
           </Text>
         </TouchableOpacity>
 
-        {/* Alternative actions */}
         <View style={S.alternativeActions}>
           <TouchableOpacity style={S.altAction} onPress={() => navigation.replace('Main')}>
             <Text style={S.altActionIcon}>🏠</Text>
             <Text style={S.altActionText}>Accueil</Text>
           </TouchableOpacity>
           <View style={S.altDivider} />
-          <TouchableOpacity style={S.altAction}>
+          <TouchableOpacity style={S.altAction} onPress={handleSupport}>
             <Text style={S.altActionIcon}>📞</Text>
             <Text style={S.altActionText}>Support</Text>
           </TouchableOpacity>
           <View style={S.altDivider} />
-          <TouchableOpacity style={S.altAction}>
+          <TouchableOpacity style={S.altAction} onPress={handleStatus}>
             <Text style={S.altActionIcon}>📋</Text>
-            <Text style={S.altActionText}>Status</Text>
+            <Text style={S.altActionText}>État du service</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Tips */}
         <View style={S.tipsCard}>
           <Text style={S.tipsTitle}>Solutions rapides</Text>
           {[
             '• Activez le Wi-Fi ou les données mobiles',
             '• Désactivez le VPN si actif',
             '• Redémarrez l\'application',
-            '• Vérifiez l\'état de nos serveurs',
+            '• Vérifiez l\'état de nos serveurs ci-dessus',
           ].map((tip, i) => (
             <Text key={i} style={S.tipText}>{tip}</Text>
           ))}
@@ -114,7 +195,10 @@ export default function ErreurReseauScreen({ navigation, route }) {
         {retryCount > 0 && (
           <View style={S.retryNote}>
             <Text style={S.retryNoteText}>
-              {retryCount} tentative(s) · Si le problème persiste, contactez le support.
+              {retryCount} tentative(s)
+              {lastCheck === 'up' ? ' · serveur joignable' : ''}
+              {lastCheck === 'down' ? ' · serveur toujours injoignable' : ''}
+              {' · '}Si le problème persiste, contactez le support.
             </Text>
           </View>
         )}
@@ -143,7 +227,7 @@ const styles = (C) => StyleSheet.create({
   alternativeActions: { flexDirection: 'row', backgroundColor: C.white, borderRadius: 16, overflow: 'hidden', width: '100%', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   altAction: { flex: 1, alignItems: 'center', paddingVertical: 14, gap: 4 },
   altActionIcon: { fontSize: 22 },
-  altActionText: { fontSize: 12, fontFamily: Fonts.manrope.semiBold, color: C.darkGreen },
+  altActionText: { fontSize: 12, fontFamily: Fonts.manrope.semiBold, color: C.darkGreen, textAlign: 'center' },
   altDivider: { width: 1, backgroundColor: C.offWhite },
   tipsCard: { width: '100%', backgroundColor: C.white, borderRadius: 16, padding: 16, gap: 8 },
   tipsTitle: { fontSize: 13, fontFamily: Fonts.epilogue.bold, color: C.darkGreen, marginBottom: 4 },

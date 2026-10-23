@@ -1,12 +1,21 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { emitSessionExpired } from './sessionEvents';
 
-export const API_URL = 'https://api.malaw.app/api';
+/**
+ * Adresse de l'API.
+ *
+ * Surchargeable par `EXPO_PUBLIC_API_URL` (fichier `.env` à la racine de
+ * l'app) pour viser un backend local pendant le développement, sans toucher
+ * au code. Exemple : EXPO_PUBLIC_API_URL=http://192.168.1.10:3000/api
+ *
+ * Attention sur appareil physique : « localhost » désigne le téléphone
+ * lui-même, il faut l'adresse réseau de la machine de développement.
+ */
+export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'https://api.malaw.app/api';
 
 const TOKEN_KEY = '@malaw/token';
 const REFRESH_KEY = '@malaw/refreshToken';
 const USER_KEY = '@malaw/user';
-const ACCOUNT_KEY = '@malaw/simulatedAccount';
 
 // ---------- token & session storage ----------
 
@@ -32,18 +41,17 @@ export async function getStoredUser() {
 }
 
 export async function clearSession() {
-  await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_KEY, USER_KEY]);
-}
-
-// Compte local utilisé UNIQUEMENT par le mode simulation (pas de backend) :
-// il tient lieu de "base de données" le temps que l'auth réelle soit activée.
-export async function saveSimulatedAccount(account) {
-  await AsyncStorage.setItem(ACCOUNT_KEY, JSON.stringify(account));
-}
-
-export async function getSimulatedAccount() {
-  const raw = await AsyncStorage.getItem(ACCOUNT_KEY);
-  return raw ? JSON.parse(raw) : null;
+  // Les trois dernières clés sont les vestiges de l'ancien mode simulation :
+  // elles dorment encore sur les appareils de test et contiendraient de
+  // fausses commandes. On les efface à chaque déconnexion.
+  await AsyncStorage.multiRemove([
+    TOKEN_KEY,
+    REFRESH_KEY,
+    USER_KEY,
+    '@malaw/simulatedAccount',
+    '@malaw/simulatedAddresses',
+    '@malaw/simulatedOrders',
+  ]);
 }
 
 // ---------- error type ----------

@@ -4,7 +4,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useCart } from '../context/CartContext';
-import { useUser, formatPhone } from '../hooks/useUser';
 import { PAYMENT_METHODS, paymentById } from '../constants/payments';
 
 export default function SelectionPaiementScreen({ navigation }) {
@@ -12,14 +11,15 @@ export default function SelectionPaiementScreen({ navigation }) {
   const S = styles(C);
   const insets = useSafeAreaInsets();
   const cart = useCart();
-  const { user } = useUser();
   // Le choix vit dans le panier partagé — c'est lui qu'affichera le Récap.
   const [selected, setSelected] = useState(cart.payment?.id ?? 'wave');
 
   const selectedMethod = paymentById(selected);
-  const phoneMasked = user?.phone
-    ? formatPhone(user.phone).replace(/(\d{2}) (\d{3}) (\d{2})/, '•• ••• ••')
-    : '';
+
+  // Le numéro de téléphone du compte était affiché sous chaque moyen, comme
+  // s'il s'agissait d'un compte Wave / Orange Money vérifié. Rien ne le
+  // vérifie : c'est le prestataire qui demandera le numéro à payer sur sa
+  // propre page. L'affichage a donc été retiré.
 
   const handleContinue = () => {
     const m = paymentById(selected);
@@ -97,9 +97,11 @@ export default function SelectionPaiementScreen({ navigation }) {
                   )}
                 </View>
                 <Text style={S.methodDesc}>{method.desc}</Text>
-                {phoneMasked ? (
-                  <Text style={S.methodSub}>{phoneMasked}</Text>
-                ) : null}
+                <Text style={S.methodSub}>
+                  {method.online
+                    ? 'Vous serez redirigé vers la page de paiement.'
+                    : 'Aucun prélèvement maintenant.'}
+                </Text>
               </View>
               <View style={[S.radioOuter, selected === method.id && S.radioOuterActive]}>
                 {selected === method.id && <View style={S.radioInner} />}
@@ -108,21 +110,18 @@ export default function SelectionPaiementScreen({ navigation }) {
           ))}
         </View>
 
-        {/* Security badges */}
-        <View style={S.securityRow}>
-          {['🔒 SSL Sécurisé', '✅ Paiement certifié', '🛡️ Données protégées'].map(b => (
-            <View key={b} style={S.securityBadge}>
-              <Text style={S.securityBadgeText}>{b}</Text>
-            </View>
-          ))}
-        </View>
+        {/* Les badges « SSL Sécurisé / Paiement certifié / Données
+            protégées » ont été retirés : purement décoratifs, ils
+            promettaient une garantie que rien ne soutient. */}
 
       </ScrollView>
 
       {/* CTA */}
       <View style={[S.cta, { paddingBottom: insets.bottom + 12 }]}>
         <View style={S.ctaSummary}>
-          <Text style={S.ctaSummaryLabel}>Via {selectedMethod?.label}</Text>
+          <Text style={S.ctaSummaryLabel}>
+            {selectedMethod?.online ? `Via ${selectedMethod.label}` : 'Paiement à la livraison'}
+          </Text>
           <Text style={S.ctaSummaryAmount}>{cart.total.toLocaleString()} FCFA</Text>
         </View>
         <TouchableOpacity style={S.ctaBtn} onPress={handleContinue}>
@@ -175,9 +174,6 @@ const styles = (C) => StyleSheet.create({
   radioOuter: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: C.border, justifyContent: 'center', alignItems: 'center' },
   radioOuterActive: { borderColor: C.darkGreen },
   radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.darkGreen },
-  securityRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  securityBadge: { backgroundColor: C.offWhite, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
-  securityBadgeText: { fontSize: 11, fontFamily: Fonts.manrope.semiBold, color: C.darkGray },
   cta: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.white, paddingHorizontal: 20, paddingTop: 12, gap: 10, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.08, shadowRadius: 12, elevation: 10 },
   ctaSummary: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   ctaSummaryLabel: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: C.placeholder },

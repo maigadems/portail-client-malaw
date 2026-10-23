@@ -12,6 +12,8 @@ import { logout, updateProfile } from '../api/auth';
 import { listAddresses } from '../api/addresses';
 import { pickAvatar } from '../utils/pickAvatar';
 import { uploadAvatar } from '../api/uploads';
+import { getSettings, updateSettings } from '../api/settings';
+import { unreadCount, registerPushDevice, unregisterPushDevice } from '../api/notifications';
 import { Alert } from '../components/AppAlert';
 
 export default function ProfilScreen({ navigation }) {
@@ -20,8 +22,12 @@ export default function ProfilScreen({ navigation }) {
   const { t } = useLang();
   const p = t.profile;
   const { user, reload } = useUser();
-  const [notifCommandes, setNotifCommandes] = useState(true);
-  const [notifPromos, setNotifPromos] = useState(false);
+  // Préférences du compte : `null` tant qu'elles ne sont pas chargées, pour
+  // ne pas afficher un interrupteur dont on ignore la vraie valeur.
+  const [settings, setSettings] = useState(null);
+  const [loadingSettings, setLoadingSettings] = useState(true);
+  const [savingKey, setSavingKey] = useState(null);
+  const [unread, setUnread] = useState(0);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [editEmail, setEditEmail] = useState('');
@@ -42,7 +48,58 @@ export default function ProfilScreen({ navigation }) {
     }, []),
   );
 
+  // Préférences + badge, relus à chaque affichage : le badge doit refléter
+  // ce qui est arrivé pendant que l'écran n'était pas visible.
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      getSettings()
+        .then(async (data) => {
+          if (!active) return;
+          setSettings(data);
+          // Le serveur ne pousse qu'aux appareils enregistrés : c'est ici,
+          // session ouverte et préférence connue, que l'inscription a du sens.
+          if (data?.pushEnabled) await registerPushDevice();
+        })
+        .catch(() => {}) // hors-ligne : on garde les dernières valeurs connues
+        .finally(() => { if (active) setLoadingSettings(false); });
+      unreadCount()
+        .then((n) => { if (active) setUnread(n); })
+        .catch(() => {});
+      return () => { active = false; };
+    }, []),
+  );
+
+  /**
+   * Bascule une préférence : l'interrupteur bouge tout de suite, mais revient
+   * à son état précédent si le serveur refuse — l'affichage ne doit jamais
+   * promettre un réglage qui n'est pas enregistré.
+   */
+  const toggleSetting = async (key, value) => {
+    if (savingKey || !settings) return;
+    const previous = settings[key];
+    setSettings({ ...settings, [key]: value });
+    setSavingKey(key);
+    try {
+      const saved = await updateSettings({ [key]: value });
+      setSettings(saved);
+      if (key === 'pushEnabled') {
+        if (value) await registerPushDevice();
+        else await unregisterPushDevice();
+      }
+    } catch (e) {
+      setSettings((cur) => ({ ...cur, [key]: previous }));
+      Alert.alert(t.settings.preferences, e.message);
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
   const handleLogout = async () => {
+    // Retrait de l'appareil avant logout() : après, il n'y a plus de jeton
+    // pour autoriser l'appel et le serveur continuerait de pousser les
+    // commandes du compte précédent sur ce téléphone.
+    await unregisterPushDevice();
     // logout() efface toujours la session locale même si l'appel serveur
     // échoue — on quitte donc systématiquement vers Connexion, jamais
     // bloqué par une erreur réseau ou un token périmé.
@@ -205,9 +262,7 @@ export default function ProfilScreen({ navigation }) {
           {loadingAddresses ? (
             <ActivityIndicator color={C.darkGreen} style={{ marginVertical: 16 }} />
           ) : addresses.length === 0 ? (
-            <Text style={S.addressEmpty}>
-              Aucune adresse enregistrée. Ajoutez-en une pour commander plus vite.
-            </Text>
+            <Text style={S.addressEmpty}>{p.noAddresses}</Text>
           ) : (
             addresses.map((addr) => (
               <TouchableOpacity
@@ -243,34 +298,41 @@ export default function ProfilScreen({ navigation }) {
         <View style={S.section}>
           <Text style={S.sectionTitle}>{p.notifications}</Text>
           <View style={S.notifCard}>
-            <View style={S.notifRow}>
-              <Text style={S.notifLabel}>{p.notifOrders}</Text>
-              <Switch
-                value={notifCommandes}
-                onValueChange={setNotifCommandes}
-                trackColor={{ false: C.border, true: C.darkGreen }}
-                thumbColor={C.white}
-              />
-            </View>
-            <View style={S.notifDivider} />
-            <View style={S.notifRow}>
-              <Text style={S.notifLabel}>{p.notifPromos}</Text>
-              <Switch
-                value={notifPromos}
-                onValueChange={setNotifPromos}
-                trackColor={{ false: C.border, true: C.darkGreen }}
-                thumbColor={C.white}
-              />
-            </View>
+            {loadingSettings ? (
+              <ActivityIndicator color={C.darkGreen} style={{ paddingVertical: 12 }} />
+            ) : (
+              <>
+                <View style={S.notifRow}>
+                  <Text style={S.notifLabel}>{p.notifOrders}</Text>
+                  <Switch
+                    value={!!settings?.pushEnabled}
+                    onValueChange={(v) => toggleSetting('pushEnabled', v)}
+                    trackColor={{ false: C.border, true: C.darkGreen }}
+                    thumbColor={C.white}
+                  />
+                </View>
+                <View style={S.notifDivider} />
+                <View style={S.notifRow}>
+                  <Text style={S.notifLabel}>{p.notifPromos}</Text>
+                  <Switch
+                    value={!!settings?.promoOptIn}
+                    onValueChange={(v) => toggleSetting('promoOptIn', v)}
+                    trackColor={{ false: C.border, true: C.darkGreen }}
+                    thumbColor={C.white}
+                  />
+                </View>
+              </>
+            )}
           </View>
         </View>
 
         {/* Footer links */}
+        {/* « Devenir livreur », « Devenir partenaire » et « Centre d'aide »
+            ont été retirés : ils n'avaient aucune destination, et un chevron
+            qui ne mène nulle part se lit comme une panne. */}
         <View style={S.footerLinks}>
           {[
-            { icon: 'bicycle-outline', label: p.becomeCourier, onPress: () => {} },
-            { icon: 'people-outline', label: p.becomePartner, onPress: () => {} },
-            { icon: 'help-circle-outline', label: p.helpCenter, onPress: () => {} },
+            { icon: 'notifications-outline', label: p.myNotifications, badge: unread, onPress: () => navigation.navigate('Notifications') },
             { icon: 'settings-outline', label: p.settings, onPress: () => navigation.navigate('Parametres') },
             { icon: 'log-out-outline', label: p.logout, danger: true, onPress: handleLogout },
           ].map((link, i) => (
@@ -279,6 +341,11 @@ export default function ProfilScreen({ navigation }) {
               <Text style={[S.footerLinkText, link.danger && { color: '#DC2626' }]}>
                 {link.label}
               </Text>
+              {link.badge > 0 && (
+                <View style={S.badge}>
+                  <Text style={S.badgeText}>{link.badge > 99 ? '99+' : link.badge}</Text>
+                </View>
+              )}
               <Text style={S.footerLinkChevron}>›</Text>
             </TouchableOpacity>
           ))}
@@ -570,5 +637,19 @@ const styles = (C) => StyleSheet.create({
   footerLinkChevron: {
     fontSize: 20,
     color: C.placeholder,
+  },
+  badge: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    paddingHorizontal: 6,
+    backgroundColor: C.gold,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  badgeText: {
+    fontSize: 11,
+    fontFamily: Fonts.manrope.bold,
+    color: C.white,
   },
 });

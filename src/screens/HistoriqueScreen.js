@@ -5,6 +5,7 @@ import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import TopBar from '../components/TopBar';
+import ActiveOrderCard from '../components/ui/ActiveOrderCard';
 import { listMyOrders } from '../api/orders';
 import { orderDisplayStatus, isOrderTrackable } from '../api/tracking';
 import { imageSource, getRestaurant, toRestaurantCard, toMenuItemCard } from '../api/restaurants';
@@ -231,6 +232,13 @@ export default function CommandesScreen({ navigation }) {
 
   const header = (
     <View>
+      {/* Commande en cours : visible AVANT l'historique — c'est elle qui
+          demande de l'attention, pas les commandes livrées. */}
+      <ActiveOrderCard
+        style={{ marginBottom: 16 }}
+        onPress={() => navigation.navigate('Suivi')}
+      />
+
       <View style={S.header}>
         <Text style={S.heading}>{o.heading}</Text>
         <Text style={S.subtext}>{orders.length} {o.passed}</Text>

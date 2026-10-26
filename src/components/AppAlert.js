@@ -106,6 +106,8 @@ export default function AppAlertHost() {
                   ]}
                   onPress={() => press(b)}
                   activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityLabel={b.text ?? 'OK'}
                 >
                   <Text
                     style={[

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, Animated } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import MalawLogo from '../components/MalawLogo';
@@ -25,14 +26,19 @@ export default function SplashScreen({ navigation }) {
 
     // Une session existe déjà sur l'appareil (connexion précédente) : on
     // saute directement à l'app plutôt que de rejouer Onboarding/Connexion
-    // à chaque relance — sans ça, l'utilisateur devait se reconnecter après
+    // relance — sans ça, l'utilisateur devait se reconnecter après
     // chaque reload alors que sa session locale restait valide.
+    //
+    // De même, un visiteur qui a déjà vu l'onboarding (même non connecté)
+    // retombe directement sur l'app : rejouer 3 écrans d'introduction à
+    // chaque lancement était le pire moment pour un client pressé.
     let active = true;
     const timer = setTimeout(async () => {
       const user = await getStoredUser().catch(() => null);
+      const onboarded = await AsyncStorage.getItem('@malaw/onboarded').catch(() => null);
       if (!active) return;
-      navigation.replace(user ? 'Main' : 'Onboarding1');
-    }, 2500);
+      navigation.replace(user || onboarded ? 'Main' : 'Onboarding');
+    }, 1600);
     return () => { active = false; clearTimeout(timer); };
   }, []);
 

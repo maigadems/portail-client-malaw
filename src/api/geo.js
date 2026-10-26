@@ -15,13 +15,24 @@ export const DAKAR_CENTER = { latitude: 14.6928, longitude: -17.4467 };
 // ---------- GPS de l'appareil ----------
 
 export async function hasLocationPermission() {
-  const { status } = await Location.getForegroundPermissionsAsync();
-  return status === 'granted';
+  try {
+    const { status } = await Location.getForegroundPermissionsAsync();
+    return status === 'granted';
+  } catch {
+    // Environnement sans API Permissions (navigateur non sécurisé, web
+    // embarqué, jsdom…) : la permission n'est pas accordée — l'écran
+    // propose alors « Activer ma position » au lieu de planter au montage.
+    return false;
+  }
 }
 
 export async function requestLocationPermission() {
-  const { status } = await Location.requestForegroundPermissionsAsync();
-  return status === 'granted';
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    return status === 'granted';
+  } catch {
+    return false;
+  }
 }
 
 /** Au-delà, on cesse d'attendre le GPS et on se rabat sur le dernier point. */

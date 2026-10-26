@@ -74,10 +74,12 @@ export default function PaiementScreen({ navigation, route }) {
 
   const setLastOrder = cart.setLastOrder;
 
-  /** Opens the orders list after payment. */
+  // Passe par l'écran d'attente d'acceptation : le paiement réglé n'est
+  // que la première étape — le restaurant doit encore confirmer, et le
+  // client doit le voir.
   const goToOrders = useCallback((order) => {
     if (order) setLastOrder(order);
-    navigation.replace('Main', { initialTab: 'Commandes' });
+    navigation.replace('AttenteCuisine');
   }, [navigation, setLastOrder]);
 
   // Récupère l'adresse de paiement quand l'écran a été ouvert sans elle

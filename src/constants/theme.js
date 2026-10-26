@@ -26,6 +26,14 @@ export const Colors = {
   // Status
   success: '#012D1D',
   emerald: '#ECFDF5',
+
+  // Sémantique (ajouts — non destructifs)
+  positive: '#16A34A',
+  danger: '#DC2626',
+  dangerSoft: '#FEE2E2',
+  warning: '#D97706',
+  goldSoft: '#FDF3D7',
+  greenSoft: '#E7F0EB',
 };
 
 export const DarkColors = {
@@ -56,6 +64,14 @@ export const DarkColors = {
   // Status
   success: '#1A5C3A',
   emerald: '#0D2B1A',
+
+  // Sémantique
+  positive: '#4ADE80',
+  danger: '#F87171',
+  dangerSoft: '#3B1515',
+  warning: '#FBBF24',
+  goldSoft: '#2E2610',
+  greenSoft: '#14331F',
 };
 
 export function getColors(isDark) {
@@ -82,6 +98,32 @@ export const Fonts = {
     extraBold: 'Manrope_800ExtraBold',
   },
 };
+
+/**
+ * Échelle typographique — la référence pour tout nouvel écran.
+ * Les écrans historiques gardent leurs styles inline : ces jetons servent
+ * à ce qu'on écrit désormais, pour qu'un titre se ressemble d'un écran
+ * à l'autre sans y penser.
+ */
+export const Type = {
+  display: { fontSize: 32, lineHeight: 38, fontFamily: Fonts.epilogue.bold },
+  title: { fontSize: 24, lineHeight: 30, fontFamily: Fonts.epilogue.bold },
+  heading: { fontSize: 18, lineHeight: 24, fontFamily: Fonts.epilogue.bold },
+  subheading: { fontSize: 15, lineHeight: 21, fontFamily: Fonts.manrope.semiBold },
+  body: { fontSize: 14, lineHeight: 21, fontFamily: Fonts.manrope.regular },
+  bodyBold: { fontSize: 14, lineHeight: 21, fontFamily: Fonts.manrope.bold },
+  label: { fontSize: 12, lineHeight: 16, fontFamily: Fonts.manrope.semiBold },
+  caption: { fontSize: 11, lineHeight: 15, fontFamily: Fonts.manrope.medium },
+  price: { fontSize: 16, lineHeight: 22, fontFamily: Fonts.epilogue.bold },
+};
+
+/** Rayons "modernes" : carte 20, bottom-sheet 28, pill. */
+export const RadiusSheet = 28;
+export const RadiusCard = 20;
+
+/** Hauteur canonique des gros boutons et cible tactile minimale (pouce). */
+export const ButtonHeight = 54;
+export const MinTouchTarget = 44;
 
 export const Spacing = {
   xs: 4,

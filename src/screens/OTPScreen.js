@@ -92,7 +92,14 @@ export default function OTPScreen({ navigation, route }) {
         }
       }
       Animated.spring(successScale, { toValue: 1, friction: 5, useNativeDriver: true }).start(() => {
-        setTimeout(() => navigation.replace('Main'), 800);
+        setTimeout(() => {
+          const returnTo = route?.params?.returnTo;
+          if (returnTo) {
+            navigation.reset({ index: 1, routes: [{ name: 'Main' }, { name: returnTo }] });
+          } else {
+            navigation.replace('Main');
+          }
+        }, 800);
       });
     } catch (e) {
       setError(e.status === 401 ? a.otpWrong : e.message);

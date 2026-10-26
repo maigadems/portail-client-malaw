@@ -1,31 +1,32 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Pressable, Image, ActivityIndicator } from 'react-native';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Pressable, Image,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Fonts } from '../constants/theme';
+import { Ionicons } from '@expo/vector-icons';
+import { Fonts, RadiusCard, Shadow, MinTouchTarget } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import TopBar from '../components/TopBar';
-import ClosedOverlay from '../components/ClosedOverlay';
 import { Alert } from '../components/AppAlert';
+import RestaurantCard from '../components/ui/RestaurantCard';
+import StateView from '../components/ui/StateView';
+import Skeleton from '../components/ui/Skeleton';
+import ActiveOrderCard from '../components/ui/ActiveOrderCard';
 import { listRestaurantsNearby, toRestaurantCard, neighborhoodOf } from '../api/restaurants';
 import { favoriteIds, toggleFavorite, hasSession } from '../api/favorites';
 import { reverseGeocode } from '../api/geo';
 import { askLocationPermission } from '../utils/askLocation';
 import { POSTICHES } from '../constants/postiches';
+import { useCart } from '../context/CartContext';
 
-const HERO_IMAGES = [
-  require('../../assets/images/riz-rouge-au-poulet.webp'),
-  require('../../assets/images/fastfood.png'),
-  require('../../assets/images/dessert.jpg'),
-];
+const HERO_IMAGE = require('../../assets/images/riz-rouge-au-poulet.webp');
 
-// Catégorie réelle (saisissable par le restaurateur) correspondant à chaque
-// bloc héros, par position — même mapping que les cartes "Cuisines
-// populaires" de RechercheScreen. Basé sur l'index plutôt que le libellé
-// traduit de h.heroBlocks, qui change selon la langue.
-const HERO_CATEGORIES = ['Plats', 'Fast-food', 'Boissons'];
+// Catégories réelles (saisissables par le restaurateur) des raccourcis
+// rapides — mêmes valeurs que les filtres de RechercheScreen. Index plutôt
+// que libellé traduit : le texte change selon la langue, la catégorie non.
+const QUICK_CATEGORIES = ['Plats', 'Fast-food', 'Boissons'];
 
 // Seuils réels derrière les libellés de filtres, par position dans
 // h.deliveryOptions / h.timeOptions. On indexe plutôt qu'on ne lit le texte :
@@ -39,11 +40,25 @@ function prepMinutes(resto) {
   return typeof min === 'number' ? min : null;
 }
 
+/**
+ * ACCUEIL — refonte.
+ *
+ * Réordonnancement par ordre de décision du client :
+ *   1. « Où en est ma commande ? » (bandeau temps réel, s'il y en a une)
+ *   2. « Je cherche quelque chose » (recherche visible en haut, enfin)
+ *   3. « Montre-moi » (les restaurants, plus tôt à l'écran : le héros de
+ *      450 px qui repoussait tout sous la ligne de flottaison a été
+ *      remplacé par une bannière compacte + des raccourcis de catégorie)
+ *   4. Les cartes montrent enfin ce que le serveur fournit déjà : note,
+ *      frais de livraison, distance, quartier — et plus de faux badges.
+ */
 export default function AccueilScreen({ navigation, onSearchPress }) {
   const insets = useSafeAreaInsets();
   const C = useColors();
   const { t } = useLang();
   const h = t.home;
+  const cart = useCart();
+
   // null = aucun filtre : tous les restaurants s'affichent. Cliquer sur un
   // postiche ne laisse plus voir que les restaurants qui l'ont choisi ;
   // cliquer à nouveau dessus retire le filtre.
@@ -90,9 +105,9 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
       // Géocodage inverse par restaurant, en parallèle — un échec isolé
       // (établissement sans coordonnées, requête en erreur) laisse
       // simplement son quartier absent plutôt que de bloquer les autres.
-      cards.forEach((c) => {
-        neighborhoodOf(c).then((label) => {
-          if (label) setNeighborhoods((prev) => ({ ...prev, [c.id]: label }));
+      cards.forEach((crd) => {
+        neighborhoodOf(crd).then((label) => {
+          if (label) setNeighborhoods((prev) => ({ ...prev, [crd.id]: label }));
         });
       });
       setLocationDenied(!position);
@@ -209,27 +224,65 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
         onCartPress={() => navigation.navigate('Panier')}
       />
 
-      <ScrollView showsVerticalScrollIndicator={false} style={S.scrollView} contentContainerStyle={{ paddingBottom: 24 }}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        style={S.scrollView}
+        contentContainerStyle={{ paddingBottom: cart.itemCount > 0 ? 108 : 24 }}
+      >
+        {/* 1. Recherche — visible, pas cachée derrière une icône */}
+        <TouchableOpacity
+          style={S.searchBar}
+          activeOpacity={0.85}
+          onPress={() => onSearchPress && onSearchPress('', null)}
+          accessibilityRole="search"
+        >
+          <Ionicons name="search" size={18} color={C.placeholder} />
+          <Text style={S.searchPlaceholder} numberOfLines={1}>{t.search.placeholder}</Text>
+        </TouchableOpacity>
 
-        <View style={S.heroSection}>
-          <Text style={S.heroTitle}>
-            {h.heroTitle}
-            <MaterialCommunityIcons name="motorbike" size={26} color={C.darkGreen} />
-          </Text>
-          <View style={S.heroBlocks}>
-            {h.heroBlocks.map((block, i) => (
-              <TouchableOpacity key={i} style={[S.heroBlock, i === 0 && S.heroBlockLarge]} activeOpacity={0.88} onPress={() => onSearchPress && onSearchPress('', HERO_CATEGORIES[i])}>
-                <Image source={HERO_IMAGES[i]} style={S.heroBlockImage} resizeMode="cover" />
-                <View style={S.heroBlockOverlay} />
-                <View style={S.heroBlockContent}>
-                  <Text style={S.heroBlockLabel}>{block.label}</Text>
-                  <Text style={S.heroBlockSub}>{block.sub}</Text>
-                </View>
-              </TouchableOpacity>
-            ))}
+        {/* 2. Commande en cours — null si rien à suivre */}
+        <ActiveOrderCard
+          style={{ marginBottom: 4 }}
+          onPress={() => navigation.navigate('Suivi')}
+        />
+
+        {/* 3. Bannière compacte + raccourcis */}
+        <TouchableOpacity
+          style={S.hero}
+          activeOpacity={0.9}
+          onPress={() => onSearchPress && onSearchPress('', QUICK_CATEGORIES[0])}
+        >
+          <Image source={HERO_IMAGE} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <View style={S.heroOverlay} />
+          <View style={S.heroContent}>
+            <Text style={S.heroTitle} numberOfLines={2}>{h.heroTitle}</Text>
+            <View style={S.heroCta}>
+              <Text style={S.heroCtaText}>{h.partnersSubtitle}</Text>
+              <Ionicons name="arrow-forward" size={13} color={C.darkGreen} />
+            </View>
           </View>
-        </View>
+        </TouchableOpacity>
 
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={S.quickScroll}
+          contentContainerStyle={S.quickContent}
+        >
+          {QUICK_CATEGORIES.map((cat) => (
+            <TouchableOpacity
+              key={cat}
+              style={S.quickPill}
+              onPress={() => onSearchPress && onSearchPress('', cat)}
+              activeOpacity={0.8}
+            >
+              <Text style={S.quickPillText}>{cat}</Text>
+              <Ionicons name="arrow-forward" size={12} color={C.darkGreen} />
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {/* Filtres postiches (spécialités : Dibi, Thieb, Pizza…) */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={S.categoriesScroll} contentContainerStyle={S.categoriesContent}>
           {POSTICHES.map((p) => (
             <TouchableOpacity
@@ -244,15 +297,23 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
 
         <View style={S.sectionContainer}>
           <View style={S.sectionHeader}>
-            <View>
-              <Text style={S.sectionTitle}>{h.partnersTitle}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={S.sectionTitle}>{h.partnersTitle.replace('\n', ' ')}</Text>
               <Text style={S.sectionSubtitle}>{h.partnersSubtitle}</Text>
             </View>
             <View style={S.headerActions}>
-              <TouchableOpacity style={S.filterBtn} onPress={() => navigation.navigate('Favoris')}>
+              <TouchableOpacity
+                style={S.filterBtn}
+                onPress={() => navigation.navigate('Favoris')}
+                accessibilityLabel={t.favorites.title}
+              >
                 <Ionicons name="heart-outline" size={20} color={C.darkGreen} />
               </TouchableOpacity>
-              <TouchableOpacity style={S.filterBtn} onPress={() => setShowFilter(true)}>
+              <TouchableOpacity
+                style={S.filterBtn}
+                onPress={() => setShowFilter(true)}
+                accessibilityLabel={h.filterTitle}
+              >
                 <Ionicons name="options-outline" size={20} color={C.darkGreen} />
                 {activeFiltersCount > 0 && (
                   <View style={S.filterBadge}><Text style={S.filterBadgeText}>{activeFiltersCount}</Text></View>
@@ -262,27 +323,34 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
           </View>
 
           {loading && restaurants.length === 0 && (
-            <View style={S.stateBox}>
-              <ActivityIndicator color={C.darkGreen} />
-              <Text style={S.stateText}>Chargement des restaurants…</Text>
+            <View style={S.skeletonList}>
+              {[0, 1, 2].map((i) => (
+                <View key={i} style={S.skeletonCard}>
+                  <Skeleton height={164} radius={0} />
+                  <View style={S.skeletonBody}>
+                    <Skeleton width="70%" height={16} />
+                    <Skeleton width="45%" height={12} />
+                    <Skeleton width="60%" height={12} />
+                  </View>
+                </View>
+              ))}
             </View>
           )}
 
           {!loading && error && (
-            <View style={S.stateBox}>
-              <Ionicons name="cloud-offline-outline" size={36} color={C.placeholder} />
-              <Text style={S.stateText}>{error}</Text>
-              <TouchableOpacity style={S.retryBtn} onPress={() => load(false)}>
-                <Text style={S.retryBtnText}>Réessayer</Text>
-              </TouchableOpacity>
-            </View>
+            <StateView
+              icon="cloud-offline-outline"
+              message={error}
+              actionLabel="Réessayer"
+              onAction={() => load(false)}
+            />
           )}
 
           {!loading && !error && restaurants.length === 0 && (
-            <View style={S.stateBox}>
-              <Ionicons name="restaurant-outline" size={36} color={C.placeholder} />
-              <Text style={S.stateText}>Aucun restaurant partenaire disponible pour le moment.</Text>
-            </View>
+            <StateView
+              icon="restaurant-outline"
+              message="Aucun restaurant partenaire disponible pour le moment."
+            />
           )}
 
           {!error && restaurants.length > 0 && visibleRestaurants.length === 0 && (
@@ -290,52 +358,44 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
           )}
 
           {visibleRestaurants.map((resto) => (
-            <TouchableOpacity key={resto.id} style={S.restaurantCard} onPress={() => navigation.navigate('DetailRestaurant', { restaurant: resto })}>
-              <View style={S.restaurantImageContainer}>
-                {/* Visuel neutre quand l'établissement n'a pas encore de
-                    photo — plutôt qu'une image empruntée à un autre. */}
-                {resto.image
-                  ? <Image source={resto.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
-                  : <View style={S.imagePlaceholder}><Ionicons name="restaurant-outline" size={40} color={C.placeholder} /></View>}
-                {resto.tag && <View style={S.restaurantTagBadge}><Text style={S.restaurantTagText}>{resto.tag}</Text></View>}
-                <TouchableOpacity
-                  style={S.cardHeartBtn}
-                  onPress={() => basculerFavori(resto)}
-                  disabled={favPending.includes(resto.id)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                >
-                  <Ionicons
-                    name={favIds.has(resto.id) ? 'heart' : 'heart-outline'}
-                    size={18}
-                    color={favIds.has(resto.id) ? '#EF4444' : C.charcoal}
-                  />
-                </TouchableOpacity>
-                {/* Posé en dernier : recouvre aussi le badge promo/tag, qui
-                    n'a plus lieu d'attirer l'œil quand on ne peut pas
-                    commander. */}
-                {!resto.isOpen && <ClosedOverlay />}
-              </View>
-              <View style={[S.restaurantInfo, !resto.isOpen && S.restaurantInfoClosed]}>
-                <Text style={S.restaurantName}>{resto.name}</Text>
-                <Text style={S.restaurantCuisine}>{resto.cuisine}</Text>
-                <View style={S.restaurantMeta}>
-                  <Ionicons name="time-outline" size={14} color={C.charcoal} />
-                  <Text style={S.restaurantTime}>{resto.time}</Text>
-                  {/* Quartier affiché seulement s'il a pu être résolu par
-                      géocodage inverse — sinon on n'invente pas un lieu. */}
-                  {neighborhoods[resto.id] && (
-                    <>
-                      <View style={S.metaDot} />
-                      <Ionicons name="location-outline" size={14} color={C.charcoal} />
-                      <Text style={S.restaurantTime}>{neighborhoods[resto.id]}</Text>
-                    </>
-                  )}
-                </View>
-              </View>
-            </TouchableOpacity>
+            <RestaurantCard
+              key={resto.id}
+              restaurant={resto}
+              subtitle={
+                [resto.cuisine, neighborhoods[resto.id]]
+                  .filter(Boolean)
+                  .join(' · ') || undefined
+              }
+              favorite={favIds.has(resto.id)}
+              onToggleFavorite={() => basculerFavori(resto)}
+              onPress={() => navigation.navigate('DetailRestaurant', { restaurant: resto })}
+              style={{ marginBottom: 14 }}
+            />
           ))}
         </View>
       </ScrollView>
+
+      {/* Barre panier flottante — le seul CTA de conversion de l'app,
+          désormais toujours à portée de pouce quand le panier est plein. */}
+      {cart.itemCount > 0 && (
+        <View style={[S.cartBar, { bottom: 12 }]} pointerEvents="box-none">
+          <TouchableOpacity
+            style={S.cartBarBtn}
+            onPress={() => navigation.navigate('Panier')}
+            activeOpacity={0.9}
+            accessibilityRole="button"
+            accessibilityLabel={`${t.nav.cart} : ${cart.itemCount}`}
+          >
+            <View style={S.cartBarBadge}>
+              <Ionicons name="cart" size={16} color="#FFFFFF" />
+              <Text style={S.cartBarCount}>{cart.itemCount}</Text>
+            </View>
+            <Text style={S.cartBarText}>{t.nav.cart}</Text>
+            <Text style={S.cartBarTotal}>{cart.total.toLocaleString()} FCFA</Text>
+            <Ionicons name="arrow-forward" size={16} color="#FFFFFF" />
+          </TouchableOpacity>
+        </View>
+      )}
 
       <Modal visible={showFilter} transparent animationType="slide" onRequestClose={() => setShowFilter(false)}>
         <Pressable style={S.modalOverlay} onPress={() => setShowFilter(false)} />
@@ -376,62 +436,150 @@ export default function AccueilScreen({ navigation, onSearchPress }) {
 const styles = (C) => StyleSheet.create({
   container: { flex: 1, backgroundColor: C.cream },
   scrollView: { flex: 1 },
-  heroSection: { paddingHorizontal: 24, paddingTop: 24, gap: 16 },
-  heroTitle: { fontSize: 30, fontFamily: Fonts.epilogue.bold, color: C.darkGreen, lineHeight: 38 },
-  heroBlocks: { gap: 8 },
-  heroBlock: { height: 110, borderRadius: 16, overflow: 'hidden', backgroundColor: C.darkGreen },
-  heroBlockLarge: { height: 200 },
-  heroBlockImage: { width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 },
-  heroBlockOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.38)' },
-  heroBlockContent: { position: 'absolute', bottom: 18, left: 20, right: 20, gap: 3 },
-  heroBlockLabel: { fontSize: 22, fontFamily: Fonts.epilogue.bold, color: '#FFFFFF' },
-  heroBlockSub: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: 'rgba(255,255,255,0.82)', lineHeight: 18 },
-  categoriesScroll: { marginTop: 24 },
-  categoriesContent: { paddingHorizontal: 24, gap: 8 },
-  categoryBtn: { height: 56, paddingHorizontal: 20, borderRadius: 100, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center', marginRight: 8 },
-  categoryBtnActive: { backgroundColor: C.darkGreen },
-  categoryText: { fontSize: 16, fontFamily: Fonts.manrope.bold, color: C.charcoal },
+
+  // Recherche
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 20,
+    marginTop: 14,
+    height: 50,
+    borderRadius: 999,
+    backgroundColor: C.white,
+    paddingHorizontal: 18,
+    borderWidth: 1,
+    borderColor: C.lightGray,
+    ...Shadow.sm,
+  },
+  searchPlaceholder: { flex: 1, fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.placeholder },
+
+  // Héros compact
+  hero: {
+    height: 148,
+    marginHorizontal: 20,
+    marginTop: 14,
+    borderRadius: RadiusCard,
+    overflow: 'hidden',
+    backgroundColor: C.darkGreen,
+    justifyContent: 'flex-end',
+    ...Shadow.sm,
+  },
+  heroOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(1,45,29,0.55)' },
+  heroContent: { padding: 16, gap: 8 },
+  heroTitle: { fontSize: 22, lineHeight: 27, fontFamily: Fonts.epilogue.bold, color: '#FFFFFF', maxWidth: '85%' },
+  heroCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: C.lightGold,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  heroCtaText: { fontSize: 12, fontFamily: Fonts.manrope.bold, color: C.charcoal },
+
+  // Raccourcis de catégorie
+  quickScroll: { marginTop: 12 },
+  quickContent: { paddingHorizontal: 20, gap: 8 },
+  quickPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: C.greenSoft,
+    marginRight: 4,
+  },
+  quickPillText: { fontSize: 13, fontFamily: Fonts.manrope.bold, color: C.darkGreen },
+
+  // Postiches
+  categoriesScroll: { marginTop: 12 },
+  categoriesContent: { paddingHorizontal: 20, gap: 8 },
+  categoryBtn: {
+    height: 38, paddingHorizontal: 16, borderRadius: 999, backgroundColor: C.offWhite,
+    borderWidth: 1, borderColor: C.mediumGray, justifyContent: 'center', alignItems: 'center', marginRight: 6,
+  },
+  categoryBtnActive: { backgroundColor: C.darkGreen, borderColor: C.darkGreen },
+  categoryText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
   categoryTextActive: { color: '#FFFFFF' },
-  sectionContainer: { paddingHorizontal: 24, marginTop: 32, gap: 16 },
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  sectionTitle: { fontSize: 24, fontFamily: Fonts.epilogue.bold, color: C.darkGreen, lineHeight: 32 },
-  sectionSubtitle: { fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.darkGray, marginTop: 4 },
+
+  // Section restaurants
+  sectionContainer: { paddingHorizontal: 20, marginTop: 22, gap: 4 },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 },
+  sectionTitle: { fontSize: 22, fontFamily: Fonts.epilogue.bold, color: C.darkGreen, lineHeight: 28 },
+  sectionSubtitle: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: C.darkGray, marginTop: 2 },
   emptyText: { fontSize: 13, fontFamily: Fonts.manrope.regular, color: C.placeholder, paddingVertical: 8 },
-  stateBox: { alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 36 },
-  stateText: { fontSize: 14, fontFamily: Fonts.manrope.semiBold, color: C.placeholder, textAlign: 'center', lineHeight: 21 },
-  retryBtn: { height: 46, paddingHorizontal: 24, borderRadius: 100, backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center' },
-  retryBtnText: { color: '#FFFFFF', fontSize: 14, fontFamily: Fonts.manrope.bold },
   headerActions: { flexDirection: 'row', gap: 8 },
-  imagePlaceholder: { ...StyleSheet.absoluteFillObject, backgroundColor: C.lightGray, justifyContent: 'center', alignItems: 'center' },
-  cardHeartBtn: { position: 'absolute', top: 12, right: 12, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(255,255,255,0.9)', justifyContent: 'center', alignItems: 'center' },
-  filterBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: C.offWhite, justifyContent: 'center', alignItems: 'center', position: 'relative' },
-  filterBadge: { position: 'absolute', top: -2, right: -2, width: 16, height: 16, borderRadius: 8, backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center' },
-  filterBadgeText: { color: '#FFFFFF', fontSize: 9, fontFamily: Fonts.manrope.bold },
-  restaurantCard: { backgroundColor: C.offWhite, borderRadius: 16, overflow: 'hidden' },
-  restaurantImageContainer: { height: 200, position: 'relative' },
-  restaurantTagBadge: { position: 'absolute', top: 12, left: 12, backgroundColor: C.darkGreen, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
-  restaurantTagText: { color: '#FFFFFF', fontSize: 11, fontFamily: Fonts.manrope.bold },
-  restaurantInfo: { padding: 16, gap: 4 },
-  // Le texte s'estompe aussi : le voile seul ne suffit pas quand on parcourt
-  // la liste au pouce, sans regarder les photos.
-  restaurantInfoClosed: { opacity: 0.5 },
-  restaurantName: { fontSize: 18, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
-  restaurantCuisine: { fontSize: 14, fontFamily: Fonts.manrope.regular, color: C.darkGray },
-  restaurantMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
-  metaDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: C.placeholder, marginHorizontal: 4 },
-  restaurantTime: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
+  filterBtn: {
+    width: MinTouchTarget, height: MinTouchTarget, borderRadius: 22,
+    backgroundColor: C.white, justifyContent: 'center', alignItems: 'center',
+    position: 'relative', borderWidth: 1, borderColor: C.lightGray,
+  },
+  filterBadge: {
+    position: 'absolute', top: -2, right: -2, width: 17, height: 17, borderRadius: 9,
+    backgroundColor: C.darkGreen, justifyContent: 'center', alignItems: 'center',
+  },
+  filterBadgeText: { color: '#FFFFFF', fontSize: 9.5, fontFamily: Fonts.manrope.bold },
+
+  // Squelettes
+  skeletonList: { gap: 14 },
+  skeletonCard: {
+    backgroundColor: C.white, borderRadius: RadiusCard, overflow: 'hidden', ...Shadow.sm,
+  },
+  skeletonBody: { padding: 16, gap: 8 },
+
+  // Barre panier
+  cartBar: { position: 'absolute', left: 20, right: 20 },
+  cartBarBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    height: 56,
+    borderRadius: 999,
+    backgroundColor: C.darkGreen,
+    paddingHorizontal: 12,
+    ...Shadow.lg,
+  },
+  cartBarBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.16)', borderRadius: 999,
+    paddingHorizontal: 10, paddingVertical: 6,
+  },
+  cartBarCount: { color: '#FFFFFF', fontSize: 13, fontFamily: Fonts.manrope.bold },
+  cartBarText: { flex: 1, color: '#FFFFFF', fontSize: 15, fontFamily: Fonts.manrope.bold },
+  cartBarTotal: { color: C.lightGold, fontSize: 15, fontFamily: Fonts.epilogue.bold },
+
+  // Filtres (bottom-sheet)
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
-  modalSheet: { backgroundColor: C.white, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 24, paddingTop: 12, gap: 4 },
-  modalHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: C.mediumGray, alignSelf: 'center', marginBottom: 16 },
+  modalSheet: {
+    backgroundColor: C.white, borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    paddingHorizontal: 24, paddingTop: 12, gap: 4,
+  },
+  modalHandle: {
+    width: 40, height: 4, borderRadius: 2, backgroundColor: C.mediumGray,
+    alignSelf: 'center', marginBottom: 16,
+  },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   modalTitle: { fontSize: 18, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
   modalReset: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.gold },
-  filterGroupLabel: { fontSize: 12, fontFamily: Fonts.manrope.bold, color: C.placeholder, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 12, marginBottom: 4 },
+  filterGroupLabel: {
+    fontSize: 12, fontFamily: Fonts.manrope.bold, color: C.placeholder,
+    textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 12, marginBottom: 4,
+  },
   chipsRow: { gap: 8, paddingVertical: 4 },
-  chip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: C.offWhite, borderWidth: 1.5, borderColor: C.mediumGray, marginRight: 4 },
+  chip: {
+    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: C.offWhite,
+    borderWidth: 1.5, borderColor: C.mediumGray, marginRight: 4,
+  },
   chipActive: { backgroundColor: C.darkGreen, borderColor: C.darkGreen },
   chipText: { fontSize: 13, fontFamily: Fonts.manrope.semiBold, color: C.charcoal },
   chipTextActive: { color: '#FFFFFF' },
-  applyBtn: { height: 56, backgroundColor: C.darkGreen, borderRadius: 100, justifyContent: 'center', alignItems: 'center', marginTop: 20 },
+  applyBtn: {
+    height: 56, backgroundColor: C.darkGreen, borderRadius: 999,
+    justifyContent: 'center', alignItems: 'center', marginTop: 20,
+  },
   applyBtnText: { color: '#FFFFFF', fontSize: 16, fontFamily: Fonts.manrope.bold },
 });

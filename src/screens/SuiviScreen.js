@@ -36,6 +36,18 @@ const goToHistoryFrom = (navigation) => () => {
   });
 };
 
+/**
+ * Barre d'onglets de cet écran : un miroir de celle de l'app. Sur l'ancien
+ * système, n'importe quel ongel réinitialisait vers Commandes ; avec les
+ * vrais onglets, on doit atterrir sur celui qui a été pressé.
+ */
+const goToTabFrom = (navigation) => (tab) => {
+  navigation.reset({
+    index: 0,
+    routes: [{ name: 'Main', params: { screen: tab, initialTab: tab } }],
+  });
+};
+
 /** Évite de recharger l'image de carte pour un déplacement de quelques mètres. */
 const roundCoord = (value) => (value == null ? null : Math.round(value * 10000) / 10000);
 
@@ -159,7 +171,7 @@ export default function SuiviScreen({ navigation }) {
             </>
           )}
         </View>
-        <BottomNavBar activeTab="Commandes" onTabPress={goToHistoryFrom(navigation)} />
+        <BottomNavBar activeTab="Commandes" onTabPress={goToTabFrom(navigation)} />
       </View>
     );
   }
@@ -461,7 +473,7 @@ export default function SuiviScreen({ navigation }) {
           </TouchableOpacity>
         )}
       </View>
-      <BottomNavBar activeTab="Commandes" onTabPress={goToHistory} />
+      <BottomNavBar activeTab="Commandes" onTabPress={goToTabFrom(navigation)} />
     </View>
   );
 }

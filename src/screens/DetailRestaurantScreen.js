@@ -217,7 +217,9 @@ export default function DetailRestaurantScreen({ navigation, route }) {
           <Ionicons name="arrow-back" size={20} color={C.white} />
         </TouchableOpacity>
         <Text style={S.stickyTitle}>{info.name}</Text>
-        <TouchableOpacity onPress={() => setLiked(!liked)} style={S.stickyActionBtn}>
+        {/* Même bascule que le cœur du héros : elle est persistée chez le
+            serveur (basculerFavori), pas seulement en mémoire locale. */}
+        <TouchableOpacity onPress={basculerFavori} style={S.stickyActionBtn} disabled={likePending}>
           <Ionicons name={liked ? 'heart' : 'heart-outline'} size={20} color={liked ? '#EF4444' : C.white} />
         </TouchableOpacity>
       </Animated.View>
@@ -240,11 +242,11 @@ export default function DetailRestaurantScreen({ navigation, route }) {
           <View style={S.heroOverlay} />
           {/* Top actions */}
           <View style={[S.heroActions, { marginTop: insets.top + 8 }]}>
-            <TouchableOpacity style={S.heroActionBtn} onPress={() => goBackOrHome(navigation)}>
+            <TouchableOpacity style={S.heroActionBtn} onPress={() => goBackOrHome(navigation)} accessibilityRole="button" accessibilityLabel="Retour">
               <Ionicons name="arrow-back" size={18} color={C.charcoal} />
             </TouchableOpacity>
             <View style={S.heroActionRight}>
-              <TouchableOpacity style={S.heroActionBtn} onPress={() => setLiked(!liked)}>
+              <TouchableOpacity style={S.heroActionBtn} onPress={basculerFavori} disabled={likePending}>
                 <Ionicons name={liked ? 'heart' : 'heart-outline'} size={18} color={liked ? '#EF4444' : C.charcoal} />
               </TouchableOpacity>
               <TouchableOpacity style={S.heroActionBtn} onPress={() => Share.share({ message: `Découvrez ${info.name} sur Malaw : ${restaurantShareLink(info.id)}` })}>
@@ -289,6 +291,11 @@ export default function DetailRestaurantScreen({ navigation, route }) {
               décrivait au client un menu qui n'était pas celui qu'il regardait. */}
           {info.description ? <Text style={S.description}>{info.description}</Text> : null}
 
+          {/* Les badges « Halal / Emballage éco / Livraison express » codés
+              en dur ont été retirés : affichés sur TOUS les restaurants, ils
+              promettaient des garanties que l'établissement n'avait jamais
+              déclarées. */}
+
           {/* Horaires d'ouverture — grille déclarée par le restaurateur
               depuis sa plateforme. Masquée s'il n'en a pas encore saisi. */}
           {hours?.items?.length > 0 && (
@@ -307,30 +314,22 @@ export default function DetailRestaurantScreen({ navigation, route }) {
               })}
             </View>
           )}
-
-          {/* Tags */}
-          <View style={S.tagsRow}>
-            {[
-              { icon: 'leaf-outline', label: 'Halal' },
-              { icon: 'cube-outline', label: 'Emballage éco' },
-              { icon: 'flash-outline', label: 'Livraison express' },
-            ].map(t => (
-              <View key={t.label} style={S.tag}>
-                <Ionicons name={t.icon} size={13} color={C.charcoal} />
-                <Text style={S.tagText}>{t.label}</Text>
-              </View>
-            ))}
-          </View>
         </View>
 
-        {/* Promo banner */}
+        {/* Promo banner — la date d'expiration a été retirée : le code
+            n'en a pas (voir commentaire PROMO_CODE). « Utiliser » porte le
+            code dans le panier au lieu de promettre un auto-application
+            qui n'avait jamais lieu. */}
         <View style={S.promoBanner}>
           <Ionicons name="pricetag-outline" size={22} color={C.darkGreen} />
           <View style={S.promoBannerText}>
-            <Text style={S.promoBannerTitle}>-15% sur votre 1ère commande</Text>
-            <Text style={S.promoBannerSub}>Code : MALAW15 · Expire dans 2j</Text>
+            <Text style={S.promoBannerTitle}>-15% sur votre 1ʳᵉ commande</Text>
+            <Text style={S.promoBannerSub}>Code : {PROMO_CODE} · une fois par client</Text>
           </View>
-          <TouchableOpacity style={S.promoBannerBtn} onPress={() => Alert.alert('Code promo', 'Le code MALAW15 sera appliqué automatiquement à votre prochaine commande.', [{ text: 'Super !' }])}>
+          <TouchableOpacity
+            style={S.promoBannerBtn}
+            onPress={() => navigation.navigate('Panier', { promo: PROMO_CODE })}
+          >
             <Text style={S.promoBannerBtnText}>Utiliser</Text>
           </TouchableOpacity>
         </View>
@@ -395,14 +394,14 @@ export default function DetailRestaurantScreen({ navigation, route }) {
                   </View>
                   <View style={S.qtyControl}>
                     {qtyOf(item.id) > 0 && (
-                      <TouchableOpacity style={S.qtyBtn} onPress={() => removeFromCart(item)}>
+                      <TouchableOpacity style={S.qtyBtn} onPress={() => removeFromCart(item)} accessibilityRole="button" accessibilityLabel={`Retirer ${item.name}`}>
                         <Text style={S.qtyBtnText}>−</Text>
                       </TouchableOpacity>
                     )}
                     {qtyOf(item.id) > 0 && (
                       <Text style={S.qtyValue}>{qtyOf(item.id)}</Text>
                     )}
-                    <TouchableOpacity style={[S.qtyBtn, S.qtyBtnAdd]} onPress={() => addToCart(item)}>
+                    <TouchableOpacity style={[S.qtyBtn, S.qtyBtnAdd]} onPress={() => addToCart(item)} accessibilityRole="button" accessibilityLabel={`Ajouter ${item.name}`}>
                       <Text style={[S.qtyBtnText, { color: C.white }]}>+</Text>
                     </TouchableOpacity>
                   </View>
@@ -417,7 +416,7 @@ export default function DetailRestaurantScreen({ navigation, route }) {
       {/* Sticky cart button */}
       {totalCartItems > 0 && (
         <View style={[S.cartBar, { paddingBottom: insets.bottom + 12 }]}>
-          <TouchableOpacity style={S.cartBtn} onPress={() => navigation.navigate('Panier')}>
+          <TouchableOpacity style={S.cartBtn} onPress={() => navigation.navigate('Panier')} accessibilityRole="button" accessibilityLabel="Voir le panier">
             <View style={S.cartBadge}><Text style={S.cartBadgeText}>{totalCartItems}</Text></View>
             <Text style={S.cartBtnText}>Voir le panier</Text>
             <Text style={S.cartBtnPrice}>{totalCartPrice.toLocaleString()} FCFA</Text>

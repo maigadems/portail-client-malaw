@@ -9,7 +9,7 @@ import MalawLogo from '../components/MalawLogo';
 import GoogleLogo from '../components/GoogleLogo';
 import { login, PIN_LENGTH } from '../api/auth';
 
-export default function ConnexionScreen({ navigation }) {
+export default function ConnexionScreen({ navigation, route }) {
   const C = useColors();
   const S = styles(C);
   const { t } = useLang();
@@ -37,7 +37,14 @@ export default function ConnexionScreen({ navigation }) {
     try {
       const phone = `+221${digits.startsWith('221') ? digits.slice(3) : digits}`;
       await login(phone, pin);
-      navigation.replace('Main');
+      // Retour à l'écran qui a exigé la connexion (ex. checkout) — un
+      // client renvoyé sur l'accueil perdait son panier de vue.
+      const returnTo = route?.params?.returnTo;
+      if (returnTo) {
+        navigation.reset({ index: 1, routes: [{ name: 'Main' }, { name: returnTo }] });
+      } else {
+        navigation.replace('Main');
+      }
     } catch (e) {
       setError(e.message);
     } finally {
@@ -126,6 +133,8 @@ export default function ConnexionScreen({ navigation }) {
           <TouchableOpacity
             style={[S.submitBtn, loading && { opacity: 0.7 }]}
             onPress={handleLogin}
+            accessibilityRole="button"
+            accessibilityLabel={a.login}
             disabled={loading}
           >
             {loading
@@ -136,7 +145,7 @@ export default function ConnexionScreen({ navigation }) {
           {/* Créer un compte */}
           <TouchableOpacity
             style={S.createAccountBtn}
-            onPress={() => navigation.navigate('Inscription')}
+            onPress={() => navigation.navigate('Inscription', { returnTo: route?.params?.returnTo })}
           >
             <Text style={S.createAccountBtnText}>{a.signupLink}</Text>
           </TouchableOpacity>
@@ -166,7 +175,7 @@ export default function ConnexionScreen({ navigation }) {
         {/* Footer */}
         <View style={S.footerLinks}>
           <Text style={S.footerText}>{a.noAccount}</Text>
-          <TouchableOpacity onPress={() => navigation.navigate('Inscription')}>
+          <TouchableOpacity onPress={() => navigation.navigate('Inscription', { returnTo: route?.params?.returnTo })} accessibilityRole="link">
             <Text style={S.footerLink}>{a.signupLink}</Text>
           </TouchableOpacity>
         </View>

@@ -136,7 +136,7 @@ export default function DetailPlatScreen({ navigation, route }) {
   if (!item) {
     return (
       <View style={[S.container, S.linkStateContainer, { paddingTop: insets.top }]}>
-        <TouchableOpacity style={S.topBtn} onPress={() => goBackOrHome(navigation)}>
+        <TouchableOpacity style={S.topBtn} onPress={() => goBackOrHome(navigation)} accessibilityRole="button" accessibilityLabel="Retour">
           <Ionicons name="arrow-back" size={18} color={C.charcoal} />
         </TouchableOpacity>
         <View style={S.linkStateBody}>
@@ -159,7 +159,7 @@ export default function DetailPlatScreen({ navigation, route }) {
     <View style={[S.container, { paddingTop: insets.top }]}>
       {/* Top actions */}
       <View style={S.topBar}>
-        <TouchableOpacity style={S.topBtn} onPress={() => goBackOrHome(navigation)}>
+        <TouchableOpacity style={S.topBtn} onPress={() => goBackOrHome(navigation)} accessibilityRole="button" accessibilityLabel="Retour">
           <Ionicons name="arrow-back" size={18} color={C.charcoal} />
         </TouchableOpacity>
         <View style={S.topBarTitlePill}>
@@ -243,17 +243,17 @@ export default function DetailPlatScreen({ navigation, route }) {
       <View style={[S.orderBar, { paddingBottom: insets.bottom + 12 }]}>
         {/* Qty */}
         <View style={S.qtyRow}>
-          <TouchableOpacity style={S.qtyBtn} onPress={() => setQty(q => Math.max(1, q - 1))}>
+          <TouchableOpacity style={S.qtyBtn} onPress={() => setQty(q => Math.max(1, q - 1))} accessibilityRole="button" accessibilityLabel="Diminuer la quantité">
             <Text style={S.qtyBtnText}>−</Text>
           </TouchableOpacity>
           <Text style={S.qtyValue}>{qty}</Text>
-          <TouchableOpacity style={S.qtyBtn} onPress={() => setQty(q => q + 1)}>
+          <TouchableOpacity style={S.qtyBtn} onPress={() => setQty(q => q + 1)} accessibilityRole="button" accessibilityLabel="Augmenter la quantité">
             <Text style={S.qtyBtnText}>+</Text>
           </TouchableOpacity>
         </View>
 
         <Animated.View style={{ flex: 1, transform: [{ scale: addScale }] }}>
-          <TouchableOpacity style={[S.addBtn, added && S.addBtnSuccess]} onPress={handleAdd}>
+          <TouchableOpacity style={[S.addBtn, added && S.addBtnSuccess]} onPress={handleAdd} accessibilityRole="button" accessibilityLabel="Ajouter au panier">
             <Text style={S.addBtnText}>{added ? '✓ Ajouté !' : 'Ajouter au panier'}</Text>
           </TouchableOpacity>
         </Animated.View>

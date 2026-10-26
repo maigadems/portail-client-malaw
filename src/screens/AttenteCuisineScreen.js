@@ -98,12 +98,21 @@ export default function AttenteCuisineScreen({ navigation }) {
     }
     if (status !== 'PENDING') {
       setAccepted(true);
-      // Laisse voir la confirmation avant de basculer sur l'écran suivant.
-      const jump = setTimeout(() => navigation.replace('ConfirmationCommande'), 1500);
-      return () => clearTimeout(jump);
     }
     return undefined;
-  }, [order?.status, decided, navigation]);
+  }, [order?.status, decided]);
+
+  // Enchaînement vers la confirmation UNE FOIS l'acceptation affichée.
+  // Volontairement séparé de l'effet ci-dessus : regroupé avec lui, le
+  // timer aurait été annulé par son propre cleanup dès que `accepted`
+  // passe à true (changement de dépendance), et l'écran de confirmation
+  // n'aurait jamais été atteint.
+  useEffect(() => {
+    if (!accepted || refused) return undefined;
+    // Laisse voir la confirmation avant de basculer sur l'écran suivant.
+    const jump = setTimeout(() => navigation.replace('ConfirmationCommande'), 1500);
+    return () => clearTimeout(jump);
+  }, [accepted, refused, navigation]);
 
   // Le contexte relâche une commande qui n'est plus suivable (annulée,
   // archivée) sans dire pourquoi. Plutôt que de laisser le client devant une

@@ -10,7 +10,7 @@ import GoogleLogo from '../components/GoogleLogo';
 import { sendOtp, PIN_LENGTH } from '../api/auth';
 import { pickAvatar } from '../utils/pickAvatar';
 
-export default function InscriptionScreen({ navigation }) {
+export default function InscriptionScreen({ navigation, route }) {
   const C = useColors();
   const S = styles(C);
   const { t } = useLang();
@@ -66,6 +66,7 @@ export default function InscriptionScreen({ navigation }) {
         pin: form.pin,
         avatarUrl: avatar || undefined,
         mode: 'signup',
+        returnTo: route?.params?.returnTo ?? null,
         devOtp: res?.devOtp,
       });
     } catch (e) {

@@ -4,9 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 // Auth flow
 import SplashScreen from '../screens/SplashScreen';
-import Onboarding1Screen from '../screens/Onboarding1Screen';
-import Onboarding2Screen from '../screens/Onboarding2Screen';
-import Onboarding3Screen from '../screens/Onboarding3Screen';
+import OnboardingScreen from '../screens/OnboardingScreen';
 import InscriptionScreen from '../screens/InscriptionScreen';
 import ConnexionScreen from '../screens/ConnexionScreen';
 import OTPScreen from '../screens/OTPScreen';
@@ -20,13 +18,13 @@ import MainTabs from './MainTabs';
 import DetailRestaurantScreen from '../screens/DetailRestaurantScreen';
 import DetailPlatScreen from '../screens/DetailPlatScreen';
 
-// Order flow
+// Order flow — checkout unifié : Panier concentre articles, adresse,
+// paiement et récapitulatif en un seul écran (l'ancien tunnel à quatre
+// étapes — AdresseLivraison, SelectionPaiement, RecapCommande — a été
+// supprimé : il répétait le résumé et ajoutait trois écrans d'attente).
 import PanierScreen from '../screens/PanierScreen';
-import AdresseLivraisonScreen from '../screens/AdresseLivraisonScreen';
 import EditionAdresseScreen from '../screens/EditionAdresseScreen';
 import ChoixPositionScreen from '../screens/ChoixPositionScreen';
-import SelectionPaiementScreen from '../screens/SelectionPaiementScreen';
-import RecapCommandeScreen from '../screens/RecapCommandeScreen';
 import AttenteCuisineScreen from '../screens/AttenteCuisineScreen';
 import ConfirmationCommandeScreen from '../screens/ConfirmationCommandeScreen';
 
@@ -85,11 +83,9 @@ export default function AppNavigator() {
     <NavigationContainer ref={navigationRef} linking={linking}>
       <Stack.Navigator screenOptions={{ headerShown: false, animation: 'slide_from_right' }} initialRouteName="Splash">
 
-        {/* Onboarding */}
+        {/* Onboarding — 3 écrans fusionnés en une page paginée */}
         <Stack.Screen name="Splash" component={SplashScreen} />
-        <Stack.Screen name="Onboarding1" component={Onboarding1Screen} />
-        <Stack.Screen name="Onboarding2" component={Onboarding2Screen} />
-        <Stack.Screen name="Onboarding3" component={Onboarding3Screen} />
+        <Stack.Screen name="Onboarding" component={OnboardingScreen} />
 
         {/* Auth */}
         <Stack.Screen name="Inscription" component={InscriptionScreen} />
@@ -107,13 +103,12 @@ export default function AppNavigator() {
 
         {/* Order flow */}
         <Stack.Screen name="Panier" component={PanierScreen} />
-        <Stack.Screen name="AdresseLivraison" component={AdresseLivraisonScreen} />
         {/* Enregistrement d'une adresse en deux temps : on choisit d'abord le
             lieu sur une carte plein écran, puis son type et son nom. */}
         <Stack.Screen name="ChoixPosition" component={ChoixPositionScreen} />
         <Stack.Screen name="EditionAdresse" component={EditionAdresseScreen} />
-        <Stack.Screen name="SelectionPaiement" component={SelectionPaiementScreen} />
-        <Stack.Screen name="RecapCommande" component={RecapCommandeScreen} />
+        {/* Attente d'acceptation puis confirmation : la suite naturelle de
+            toute commande (espèces comme paiement en ligne réglé). */}
         <Stack.Screen name="AttenteCuisine" component={AttenteCuisineScreen} options={{ animation: 'fade', gestureEnabled: false }} />
         <Stack.Screen name="ConfirmationCommande" component={ConfirmationCommandeScreen} options={{ animation: 'fade', gestureEnabled: false }} />
 

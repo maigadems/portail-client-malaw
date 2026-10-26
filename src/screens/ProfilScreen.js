@@ -7,7 +7,10 @@ import { Fonts } from '../constants/theme';
 import { useColors } from '../context/ThemeContext';
 import { useLang } from '../context/LanguageContext';
 import TopBar from '../components/TopBar';
+import Button from '../components/ui/Button';
+import Skeleton from '../components/ui/Skeleton';
 import { useUser, formatPhone } from '../hooks/useUser';
+import { getToken } from '../api/client';
 import { logout, updateProfile } from '../api/auth';
 import { listAddresses } from '../api/addresses';
 import { pickAvatar } from '../utils/pickAvatar';
@@ -34,6 +37,25 @@ export default function ProfilScreen({ navigation }) {
   const [saving, setSaving] = useState(false);
   const [addresses, setAddresses] = useState([]);
   const [loadingAddresses, setLoadingAddresses] = useState(true);
+
+  // Session : connue avant l'arrivée de `user` (plus lent, GET /auth/me),
+  // pour éviter qu'un client connecté voie un écran « invié » clignoter
+  // le temps du premier rafraîchissement.
+  // null = encore inconnu, true/false = session présente/absente. Le
+  // tri-value compte : réduire à un booléen affichait indéfiniment le
+  // squelette (ou l'état invitə) faute de distinguer « en cours » de « non ».
+  const [sessionKnown, setSessionKnown] = useState(null);
+  const loggedIn = !!user;
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      getToken()
+        .then((tok) => { if (active) setSessionKnown(!!tok); })
+        .catch(() => { if (active) setSessionKnown(false); });
+      return () => { active = false; };
+    }, []),
+  );
 
   // Rechargées à chaque affichage : au retour de l'éditeur, la liste reflète
   // immédiatement l'ajout, la modification ou la suppression.
@@ -157,6 +179,40 @@ export default function ProfilScreen({ navigation }) {
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
 
+        {/* ── Trois états : session inconnue (squelette), invité (invite),
+            connecté (profil complet) ─────────────────────────────────── */}
+        {sessionKnown === null || (sessionKnown && !user) ? (
+          // Session inconnue, ou session connue mais identité encore
+          // chargée (GET /auth/me en vol) : squelette, jamais d'invité
+          // fantôme pour un compte connecté.
+          <View style={[S.identitySection, { gap: 12, alignItems: 'center' }]}>
+            <Skeleton width={96} height={96} radius={48} />
+            <Skeleton width={170} height={20} />
+            <Skeleton width={120} height={14} />
+          </View>
+        ) : !loggedIn ? (
+          <View style={S.guestWrap}>
+            <View style={S.guestIconCircle}>
+              <Ionicons name="person-outline" size={32} color={C.darkGreen} />
+            </View>
+            <Text style={S.guestTitle}>{p.guestTitle}</Text>
+            <Text style={S.guestMsg}>{p.guestMsg}</Text>
+            <View style={S.guestActions}>
+              <Button
+                title={p.signIn}
+                onPress={() => navigation.navigate('Connexion')}
+                style={{ flex: 1 }}
+              />
+              <Button
+                title={p.createAccount}
+                variant="secondary"
+                onPress={() => navigation.navigate('Inscription')}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        ) : (
+        <>
         {/* Identity header */}
         <View style={S.identitySection}>
           {/* Avatar */}
@@ -326,15 +382,21 @@ export default function ProfilScreen({ navigation }) {
           </View>
         </View>
 
-        {/* Footer links */}
+        </>
+        )}
+
+        {/* Footer links — présents en mode invité aussi : Favoris et
+            réclamations savent eux-mêmes inviter à se connecter. */}
         {/* « Devenir livreur », « Devenir partenaire » et « Centre d'aide »
             ont été retirés : ils n'avaient aucune destination, et un chevron
             qui ne mène nulle part se lit comme une panne. */}
         <View style={S.footerLinks}>
           {[
+            { icon: 'heart-outline', label: p.myFavorites, onPress: () => navigation.navigate('Favoris') },
             { icon: 'notifications-outline', label: p.myNotifications, badge: unread, onPress: () => navigation.navigate('Notifications') },
+            { icon: 'alert-circle-outline', label: p.myClaims, onPress: () => navigation.navigate('MesReclamations') },
             { icon: 'settings-outline', label: p.settings, onPress: () => navigation.navigate('Parametres') },
-            { icon: 'log-out-outline', label: p.logout, danger: true, onPress: handleLogout },
+            ...(loggedIn ? [{ icon: 'log-out-outline', label: p.logout, danger: true, onPress: handleLogout }] : []),
           ].map((link, i) => (
             <TouchableOpacity key={i} style={S.footerLink} onPress={link.onPress}>
               <Ionicons name={link.icon} size={18} color={link.danger ? '#DC2626' : C.darkGreen} style={S.footerLinkIcon} />
@@ -360,6 +422,31 @@ const styles = (C) => StyleSheet.create({
     flex: 1,
     backgroundColor: C.cream,
   },
+  guestWrap: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingTop: 28,
+    paddingBottom: 8,
+    gap: 12,
+  },
+  guestIconCircle: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: C.greenSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  guestTitle: { fontSize: 20, fontFamily: Fonts.epilogue.bold, color: C.darkGreen },
+  guestMsg: {
+    fontSize: 14,
+    lineHeight: 21,
+    fontFamily: Fonts.manrope.regular,
+    color: C.darkGray,
+    textAlign: 'center',
+    paddingHorizontal: 12,
+  },
+  guestActions: { flexDirection: 'row', gap: 10, alignSelf: 'stretch', marginTop: 8 },
   identitySection: {
     alignItems: 'center',
     paddingTop: 16,
